@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { EvidenceLedger } from './src/evidence.js';
 import { createService, type AssistService } from './src/service.js';
-import { ADVISORY, POLICY_VERSION, clean, digest, skillRequest, selectedSkills, reviewRequest, reviewAdvice, type Request } from './src/decisions.js';
+import { ADVISORY, POLICY_VERSION, clean, digest, skillRequest, selectedSkills, reviewRequest, reviewAdvice, IncompleteAnswersError, type Request } from './src/decisions.js';
 
 const CONFIG = join(homedir(), '.pi', 'agent', 'jev-assist', 'config.json');
 function readEnabled(): boolean {
@@ -93,18 +93,28 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
       if(ctx.hasUI) ctx.ui.setWidget('jev-assist',[`Jev advice unavailable (${result.reason}); no verification conclusion.`]);
       return;
     }
-    const advice=reviewAdvice(result.answers,prepared.candidates);
-    record('review',prepared.request,{status:'judged',model:result.model,elapsedMs:result.elapsedMs,flags:advice.flags,ranking:advice.ranking,omittedFindings:prepared.omitted,evidenceDropped:evidence.dropped});
+    let advice;
+    try { advice=reviewAdvice(result.answers,prepared.candidates); }
+    catch (error) {
+      // An omitted answer is a service fault, not an abstention; say so rather
+      // than silently dropping the finding it belonged to.
+      const incomplete=error instanceof IncompleteAnswersError;
+      record('review',prepared.request,{status:incomplete?'incomplete':'error',missing:incomplete?error.missing:undefined});
+      if(ctx.hasUI) ctx.ui.setWidget('jev-assist',[`Jev returned an incomplete judgment; no conclusion drawn (${incomplete?error.missing.length:0} missing answers).`]);
+      return;
+    }
+    record('review',prepared.request,{status:'judged',model:result.model,elapsedMs:result.elapsedMs,flags:advice.flags,ranking:advice.ranking,unassessable:advice.unassessable,omittedFindings:prepared.omitted,evidenceDropped:evidence.dropped});
     const lines=[...advice.flags];
     if(advice.ranking.length) lines.push('Review priority (all candidates retained; low support is not a refutation):',...advice.ranking.map(r=>{
       const candidate=prepared.candidates.find(c=>c.id===r.id)!;
-      return `${r.id}: support ${r.supported.toFixed(2)}, impact ${r.impact.toFixed(2)}/3 — ${clean(candidate.claim,180)}`;
+      const gap=r.gap ? ` [gap: ${r.gap}]` : '';
+      return `${r.id}: support ${r.supported.toFixed(2)}, impact ${r.impact.toFixed(2)}/3, confidence ${r.confidence.toFixed(2)}${gap} — ${clean(candidate.claim,180)}`;
     }));
     if(!lines.length) {
       if(ctx.hasUI) ctx.ui.setWidget('jev-assist',undefined);
       return; // No reassuring "verified" message on a low score.
     }
-    lines.push(`Coverage: ${evidence.dropped} ledger entries and ${Math.max(0,evidence.observations.length-12)} observations omitted; ${prepared.omitted} finding candidates omitted.`,ADVISORY);
+    lines.push(`Coverage: ${evidence.dropped} ledger entries and ${Math.max(0,evidence.observations.length-12)} observations omitted; ${prepared.omitted} finding candidates omitted; ${advice.unassessable} not assessable from the record.`,ADVISORY);
     if(ctx.hasUI) ctx.ui.setWidget('jev-assist',lines);
     // Persists advisory context, but explicitly does not start a new agent run.
     pi.sendMessage({customType:'jev-assist-review',content:lines.join('\n'),display:true},{triggerTurn:false});

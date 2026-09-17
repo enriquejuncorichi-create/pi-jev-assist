@@ -81,7 +81,17 @@ function redactedJson(value: unknown, ancestors = new Set<object>(), depth = 0):
 }
 
 function safeReason(error: unknown): string {
-  const code = error && typeof error === "object" ? Object.getOwnPropertyDescriptor(error, "code")?.value : undefined;
+  if (!error || typeof error !== "object") return "upstream";
+  const own = (key: string) => Object.getOwnPropertyDescriptor(error, key)?.value;
+  const code = own("code");
+  // The server rejects an oversized state with its own 400; a locally-passing
+  // size check does not guarantee acceptance. Distinguish it from a generic
+  // HTTP failure so the caller can shrink the request rather than retry it.
+  // Error-type detail per NiazMorshed2007/jev-review src/jev/client.ts.
+  const status = own("status");
+  const detail = own("detail");
+  const errorType = detail && typeof detail === "object" ? Object.getOwnPropertyDescriptor(detail, "error_type")?.value : undefined;
+  if (errorType === "max_tokens_exceeded" || (status === 400 && typeof own("message") === "string" && /max_tokens_exceeded/.test(own("message")))) return "oversize_upstream";
   return typeof code === "string" && ["aborted", "timeout", "configuration", "validation", "budget", "response", "connection", "http"].includes(code) ? code : "upstream";
 }
 
