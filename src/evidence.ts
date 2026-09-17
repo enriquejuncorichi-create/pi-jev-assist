@@ -6,52 +6,37 @@ export interface Observation {
   tool: string;
   call: string;
   output: string;
+  // Pi's bash tool reports no exit code, so `ok` means only "the tool did not
+  // report an error" — never "the command's checks passed".
   status: "error" | "ok" | "unknown";
   mutation: boolean;
   sequence: number;
-}
-export interface Check {
-  id: string;
-  kind: "test" | "lint" | "typecheck" | "build" | "check";
-  status: "passed" | "failed" | "unknown";
-  afterMutation: number;
-  call: string;
 }
 export interface EvidenceSnapshot {
   observations: Observation[];
   mutations: number;
   unknownMutations: number;
   dropped: number;
-  checks: Check[];
 }
 
 type Entry = {
   observation: Observation;
-  generation: number;
   excluded: boolean;
   finished: boolean;
-  kind?: Check["kind"];
-  check?: Check;
 };
 const READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const SENSITIVE = /(?:^|[\s/\\"'])\.?env(?:[.\s/\\"']|$)|auth|credential|private[-_ ]?key|(?:^|[/\\])\.ssh(?:[/\\]|$)|id_(?:rsa|ed25519|ecdsa)|\.(?:pem|key|p12|pfx)(?:$|[\s"'])/i;
 const excerpt = (text: string, limit: number): string => redact(text).slice(0, limit);
 const entryKey = (id: string): string => createHash("sha256").update(id).digest("hex");
 
-function checkKind(command: string): Check["kind"] | undefined {
-  // Deliberately not a shell parser: accept only direct, plain argv commands.
-  if (!/^[a-zA-Z0-9_./:@= +,-]+$/.test(command)) return undefined;
-  const match = /^(?:bun run (test|lint|typecheck|build|check)|bun (test)|node (--test))(?: |$)/.exec(command);
-  if (!match) return undefined;
-  return (match[1] ?? "test") as Check["kind"];
-}
-function exitCode(details: unknown): number | undefined {
-  if (!details || typeof details !== "object" || !("exitCode" in details)) return undefined;
-  const value = details.exitCode;
-  return typeof value === "number" && Number.isInteger(value) ? value : undefined;
-}
-
-/** Bounded observations, not proof. Check freshness uses mutations + unknownMutations. */
+/**
+ * Bounded observations, not proof. There is deliberately no check/pass layer:
+ * Pi's bash tool emits no exit status (dist/core/tools/bash.js only sets
+ * `details` for truncation), and real agent commands are compound
+ * (`cd x && node --test | tail`), so any "this check passed" conclusion drawn
+ * here would be inferred from output prose. Classification is left to the judge,
+ * which sees the command and its output as untrusted observations.
+ */
 export class EvidenceLedger {
   private entries = new Map<string, Entry>();
   private mutations = 0;
@@ -89,10 +74,8 @@ export class EvidenceLedger {
     const call = excluded ? "[sensitive content omitted]" : excerpt(tool === "bash" ? command : `${tool}${path ? ` ${path}` : ""}`, 300);
     this.entries.set(key, {
       observation: { id: excerpt(id, 300), tool: excerpt(tool, 100), call, output: "", status: "unknown", mutation: mutation || !READ_TOOLS.has(tool), sequence },
-      generation: this.mutations + this.unknownMutations,
       excluded,
       finished: false,
-      kind: tool === "bash" && !excluded ? checkKind(command) : undefined,
     });
   }
 
@@ -101,20 +84,20 @@ export class EvidenceLedger {
     const entry = this.entries.get(key);
     if (entry?.finished || this.retired.has(key)) return;
     if (!entry) {
-      // A missing call has no trustworthy generation or classification; discard its content.
+      // A missing call has no trustworthy classification; discard its content.
       this.unknownMutations++;
       if (id.length > 300) { this.dropped++; return; }
       this.reserve();
       this.entries.set(key, {
         observation: { id: excerpt(id, 300), tool: excerpt(tool, 100), call: "[orphan result]", output: "", status: "unknown", mutation: true, sequence: ++this.sequence },
-        generation: this.mutations + this.unknownMutations, excluded: true, finished: true,
+        excluded: true, finished: true,
       });
       return;
     }
     entry.finished = true;
-    const code = exitCode(details);
     const matchesTool = entry.observation.tool === tool;
-    entry.observation.status = !matchesTool ? "unknown" : isError || (code !== undefined && code !== 0) ? "error" : code === 0 ? "ok" : "unknown";
+    // `isError` is the only status signal Pi actually provides.
+    entry.observation.status = !matchesTool ? "unknown" : isError ? "error" : "ok";
     if (!entry.excluded && matchesTool) {
       const text = content.filter(part => part.type === "text").map(part => part.text ?? "").join("\n");
       // Search results can expose excluded files even when the searched directory is ordinary.
@@ -126,20 +109,12 @@ export class EvidenceLedger {
       });
       entry.observation.output = sensitiveSource ? '[sensitive search results omitted]' : excerpt(text, 1200);
     }
-    if (entry.kind) entry.check = {
-      id: entry.observation.id,
-      kind: entry.kind,
-      status: entry.observation.status === "error" ? "failed" : entry.observation.status === "ok" ? "passed" : "unknown",
-      afterMutation: entry.generation,
-      call: entry.observation.call,
-    };
   }
 
   snapshot(): EvidenceSnapshot {
     return {
       observations: [...this.entries.values()].map(entry => ({ ...entry.observation })),
       mutations: this.mutations, unknownMutations: this.unknownMutations, dropped: this.dropped,
-      checks: [...this.entries.values()].flatMap(entry => entry.check ? [{ ...entry.check }] : []),
     };
   }
 

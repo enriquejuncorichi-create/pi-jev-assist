@@ -15,7 +15,7 @@ test('overlarge catalogue abstains explicitly instead of claiming full coverage'
 test('bad probabilities cannot become advice',()=>{ for(const v of [NaN,Infinity,-1,2,'1',null]) assert.equal(probability({noul:v}),undefined); });
 test('uses upstream warden questions with matching state keys',()=>{
  const observations=Array.from({length:3},(_,i)=>({id:String(i),tool:'bash',call:'false',output:'failure',status:'error' as const,mutation:false,sequence:i}));
- const p=reviewRequest('fix tests','Risk: failed tests',{observations,mutations:1,unknownMutations:0,checks:[],dropped:0});
+ const p=reviewRequest('fix tests','Risk: failed tests',{observations,mutations:1,unknownMutations:0,dropped:0});
  assert.deepEqual(p.request.questions.claims_done,doneQuestions.claims_done);
  assert.deepEqual(p.request.questions.same_strategy,stuckQuestions.same_strategy);
  const state=p.request.state as Record<string,unknown>; assert.equal(state.final_message,'Risk: failed tests'); assert.ok(state.attempts);
@@ -31,6 +31,6 @@ test('review triage ranks supported findings before unsupported severe ones',()=
 });
 test('redaction runs before truncation and findings omissions are explicit',()=>{
  const secret='ghp_'+'a'.repeat(36); assert.ok(!clean(secret,15).includes('ghp_'));
- const p=reviewRequest('task',Array.from({length:8},(_,i)=>`Finding ${i}: bug`).join('\n\n'),{observations:[],mutations:0,unknownMutations:0,checks:[],dropped:0});
+ const p=reviewRequest('task',Array.from({length:8},(_,i)=>`Finding ${i}: bug`).join('\n\n'),{observations:[],mutations:0,unknownMutations:0,dropped:0});
  assert.equal(p.candidates.length,6); assert.equal(p.omitted,2);
 });
