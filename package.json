@@ -1,0 +1,24 @@
+{
+  "name": "enrique-pi-jev-assist",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --import tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run typecheck && bun run test"
+  },
+  "dependencies": {
+    "pi-typesafe": "0.4.0",
+    "pi-warden": "0.12.0"
+  },
+  "overrides": { "pi-typesafe": "0.4.0" },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@types/node": "^24.0.0",
+    "tsx": "4.23.13",
+    "typescript": "6.0.2"
+  },
+  "bundledDependencies": ["pi-typesafe", "pi-warden"],
+  "pi": { "extensions": ["./index.ts"] }
+}
