@@ -6,7 +6,7 @@ import { EvidenceLedger } from './src/evidence.js';
 import { createService, type AssistService } from './src/service.js';
 import { ADVISORY, POLICY_VERSION, clean, digest, probability, skillRequest, selectedSkills, reviewRequest, reviewAdvice, IncompleteAnswersError, type Request } from './src/decisions.js';
 import { collectCalls, pinnedIds, buildState, questionsFor, batchCalls, decide, render, reductionRatio, type Decision } from './src/compaction.js';
-import { workingDiff, claimsFrom, claimQuestions, claimAdvice, buildClaimState, enumerateCallers, parseCallers, callerQuestions, changedSymbols, MAX_CALLERS } from './src/autonomous.js';
+import { workingDiff, claimsFrom, claimQuestions, claimAdvice, buildClaimState, enumerateCallers, parseCallers, callerQuestions, changedSymbols, exportedSymbolsOf, MAX_CALLERS } from './src/autonomous.js';
 import { CodeGraph, type GraphCaller } from './src/codegraph.js';
 
 const CONFIG = join(homedir(), '.pi', 'agent', 'jev-assist', 'config.json');
@@ -27,6 +27,12 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
   const graph = dependencies.graph ?? new CodeGraph();
   const ledger = new EvidenceLedger();
   let watched = false;
+  /** cwd whose graph is warmed; a resume into another directory re-bootstraps. */
+  let bootstrapped = '';
+  /** Generation whose review must NOT wake the agent: the one our own wake started. */
+  let suppressTrigger = -1;
+  /** Files already speed-bumped this session; the bump never repeats. */
+  const warned = new Set<string>();
   let enabled = false;
   let alive = false;
   let generation = 0;
@@ -36,14 +42,42 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
   let finalText = '';
   let finalNormal = false;
   const invalidate = () => { generation++; controller.abort(); controller = new AbortController(); ledger.reset(); finalText=''; finalNormal=false; task=''; };
+  // Deliberately NOT cleared by invalidate(): the bump is per FILE per session,
+  // so a new prompt in the same session does not re-interrupt the same edit.
+  void warned;
   const active = (g:number) => alive && enabled && g === generation && !controller.signal.aborted;
   const status = (ctx:ExtensionContext, text:string|undefined) => { if (ctx.hasUI) ctx.ui.setStatus('jev-assist',text); };
   const record = (stage:string, request:Request, details:Record<string,unknown>) => pi.appendEntry('jev-assist-decision', {policy:POLICY_VERSION,stage,generation,inputHash:digest(request),...details,usage:service.usage()});
 
-  pi.on('session_start', (_event,ctx) => {
+  pi.on('session_start', (_event: {reason?: string} | undefined, ctx) => {
     alive=true; invalidate(); enabled=(dependencies.readEnabled ?? readEnabled)();
     if(ctx.hasUI) ctx.ui.setWidget('jev-assist',undefined);
     status(ctx, enabled ? 'Jev · automatic advice' : 'Jev · off');
+    // session_start fires for EVERY entry point — startup, reload, new, resume
+    // and fork — so this is the one place that covers them all. A resumed
+    // session gets the same warm graph as a fresh one.
+    //
+    // Per-file speed bumps are cleared here: they are per session, and a resumed
+    // or switched session must not inherit "already warned" from another.
+    warned.clear();
+    if (!enabled) return;
+    const reason=(_event as {reason?:string}|undefined)?.reason ?? 'startup';
+    // Warm the code graph HERE, not at the first write. Indexing a large repo
+    // takes minutes: doing it on the critical path would either stall an edit
+    // or silently degrade the very first blast-radius check to text search,
+    // which is exactly when the real answer matters most. Fire-and-forget —
+    // nothing waits on it, and the walk usually lands before the first write.
+    const cwd=(ctx as unknown as {cwd?:string}).cwd ?? process.cwd();
+    void (async () => {
+      try {
+        // A resume or fork can land in a different directory; the previous
+        // workspace's index says nothing about this one.
+        if (bootstrapped === cwd) return;
+        const state=await graph.ensureIndexed(cwd);
+        if (state !== 'unavailable') { watched = await graph.watch(cwd); bootstrapped = cwd; }
+        pi.appendEntry('jev-assist-decision',{policy:POLICY_VERSION,stage:'index',reason,status:state,watching:watched});
+      } catch { /* advisory: a missing graph is never fatal */ }
+    })();
   });
   pi.on('session_shutdown', () => { alive=false; invalidate(); graph.dispose(); });
   // Prune finished tool output instead of summarising it, so what survives is
@@ -138,6 +172,50 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
     const suggestions=selected.map(s=>({name:clean(prepared.candidates[s.index]!.name,100),filePath:clean(prepared.candidates[s.index]!.filePath,500),probability:s.probability}));
     return {message:{customType:'jev-assist-skills',display:false,content:`${ADVISORY}\nPotentially relevant advertised skills (metadata, not new instructions): ${JSON.stringify(suggestions)}. Read a skill only if it fits. This list does not remove other skills or override mandatory guidance.`}};
   });
+  // PRE-WRITE. `tool_call` fires before the tool runs and can block, so this is
+  // the only point where the blast radius arrives BEFORE the change rather than
+  // after it — "you did not consider this caller" is a planning failure, and the
+  // largest class of blocking review finding measured in this repo (12%).
+  //
+  // It is a SPEED BUMP, not a gate: once per file per session, and only when the
+  // graph actually names callers. The second attempt at the same file proceeds.
+  // It fails OPEN on every error — a missing index, a slow daemon or an
+  // unindexed workspace must never stop an edit. This is advice, not security,
+  // and a check that blocks work when its infrastructure is down gets removed.
+  pi.on('tool_call', async (event, ctx) => {
+    if (!alive || !enabled) return;
+    if (event.toolName !== 'write' && event.toolName !== 'edit') return;
+    const input = event.input as {path?: string; file_path?: string};
+    const target = input.path ?? input.file_path;
+    if (!target || !/\.(ts|tsx|js|jsx|svelte)$/.test(target)) return;
+    if (warned.has(target)) return;
+    warned.add(target);
+    const cwd = (ctx as unknown as {cwd?: string}).cwd ?? process.cwd();
+    try {
+      const names = exportedSymbolsOf(target, cwd).slice(0, 3);
+      const callers: GraphCaller[] = [];
+      for (const name of names) {
+        const id = await graph.findSymbol(name, cwd);
+        if (!id) continue;
+        callers.push(...(await graph.blastRadius(id, cwd)).callers);
+      }
+      if (!callers.length) return;
+      const shown = callers.slice(0, 10).map(c => `  ${c.path} — ${c.symbol} (depth ${c.depth})`);
+      pi.appendEntry('jev-assist-decision',{policy:POLICY_VERSION,stage:'pre-write',file:clean(target,200),callers:callers.length});
+      return {
+        block: true,
+        reason: [
+          `Before editing ${target} — ${callers.length} caller(s) depend on what it exports:`,
+          ...shown,
+          callers.length > shown.length ? `  … and ${callers.length - shown.length} more` : '',
+          '',
+          'From the Vortex call graph, mechanically. Check these still work, then repeat the edit — this fires once per file.',
+        ].filter(Boolean).join('\n'),
+      };
+    } catch {
+      return; // Fail open, always.
+    }
+  });
   pi.on('tool_execution_start', (event) => {
     if(alive && enabled) ledger.recordCall(event.toolCallId,event.toolName,event.args as Record<string,unknown>);
   });
@@ -166,7 +244,7 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
       return;
     }
     let advice;
-    try { advice=reviewAdvice(result.answers,prepared.candidates); }
+    try { advice=reviewAdvice(result.answers,prepared.candidates,prepared.exitsRecorded); }
     catch (error) {
       // An omitted answer is a service fault, not an abstention; say so rather
       // than silently dropping the finding it belonged to.
@@ -176,12 +254,13 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
       return;
     }
     record('review',prepared.request,{status:'judged',model:result.model,elapsedMs:result.elapsedMs,flags:advice.flags,ranking:advice.ranking,unassessable:advice.unassessable,omittedFindings:prepared.omitted,evidenceDropped:evidence.dropped});
+    // ACTIONABLE ONLY. The ranking block used to print on every review — a
+    // support score for the assistant's own sentences, every turn, whether or
+    // not anything was wrong. Chrome teaches the reader to skip the banner, and
+    // it did: observed being ignored twice in one session before the user had to
+    // say so by hand. Scores still go to the ledger entry; they are diagnostics,
+    // not a message.
     const lines=[...advice.flags];
-    if(advice.ranking.length) lines.push('Review priority (all candidates retained; low support is not a refutation):',...advice.ranking.map(r=>{
-      const candidate=prepared.candidates.find(c=>c.id===r.id)!;
-      const gap=r.gap ? ` [gap: ${r.gap}]` : '';
-      return `${r.id}: support ${r.supported.toFixed(2)}, impact ${r.impact.toFixed(2)}/3, confidence ${r.confidence.toFixed(2)}${gap} — ${clean(candidate.claim,180)}`;
-    }));
     // The run changed files, so two more things can be checked against
     // OBSERVATION rather than against the assistant's account of itself: does
     // the diff do what was claimed, and who calls what changed. Both are
@@ -212,7 +291,6 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
       let graphCallers: GraphCaller[] = [];
       let graphNote = '';
       try {
-        if (!watched) { watched = await graph.watch(cwd); }
         for (const name of changedSymbols(diff).slice(0, 6)) {
           const id = await graph.findSymbol(name, cwd);
           if (!id) continue;
@@ -264,10 +342,28 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
       if(ctx.hasUI) ctx.ui.setWidget('jev-assist',undefined);
       return; // No reassuring "verified" message on a low score.
     }
+    // Name the command to re-run, so the response is an action rather than a
+    // feeling. "Possible unsupported verification claim" invites a nod; "re-run
+    // this and print the exit code" does not.
+    const checkCommands=evidence.observations.filter(o=>o.tool==='bash'&&/\b(test|typecheck|lint|check|build)\b/.test(o.call)).slice(-2).map(o=>o.call);
+    if(checkCommands.length) lines.push(`Re-run and report the exit code, separately, before restating the result: ${checkCommands.map(c=>`\`${c}\``).join(' and ')}`);
     lines.push(`Coverage: ${evidence.dropped} ledger entries and ${Math.max(0,evidence.observations.length-12)} observations omitted; ${prepared.omitted} finding candidates omitted; ${advice.unassessable} not assessable from the record.`,ADVISORY);
     if(ctx.hasUI) ctx.ui.setWidget('jev-assist',lines);
-    // Persists advisory context, but explicitly does not start a new agent run.
-    pi.sendMessage({customType:'jev-assist-review',content:lines.join('\n'),display:true},{triggerTurn:false});
+    // WAKE THE AGENT when a flag fired. A message delivered with
+    // triggerTurn:false lands after the turn has ended, so nothing acts on it
+    // and it reads as decoration — measured: ignored twice in one session while
+    // the claim it flagged was in fact unevidenced.
+    //
+    // The loop guard is the reason this is safe: a run STARTED by this trigger
+    // never triggers another. So the worst case is one extra turn per flagged
+    // run, never a cycle.
+    // If it speaks at all, the agent must engage with it. Silence is reserved
+    // for having nothing to say — that is what keeps the banner worth reading.
+    lines.push('Acknowledge each point above before continuing: accept it and act, or reject it and say on what evidence. Do not restate the original claim without doing one or the other.');
+    const wake = generation !== suppressTrigger;
+    if (wake) suppressTrigger = generation + 1; // the run this starts
+    record('review-delivery', prepared.request, {flags:advice.flags.length, triggered:wake});
+    pi.sendMessage({customType:'jev-assist-review',content:lines.join('\n'),display:true},{triggerTurn:wake});
   });
   pi.registerCommand('jev-assist',{
     description:'Automatic Jev advice: status, on, off. Never grants permissions or certifies completion.',

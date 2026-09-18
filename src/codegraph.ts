@@ -48,6 +48,11 @@ export class CodeGraph {
       try { child = spawn(this.command, ['--mcp'], { stdio: ['pipe', 'pipe', 'pipe'] }); }
       catch (error) { this.broken = true; reject(error as Error); return; }
       this.child = child;
+      // A live child keeps Node's event loop open, so a host that has finished
+      // its work would hang waiting for a daemon it no longer needs. Unref means
+      // this process can exit whenever it likes; the child is killed on
+      // session_shutdown anyway. Found by the test suite hanging forever.
+      child.unref();
       child.on('error', error => { this.broken = true; this.failAll(error as Error); reject(error as Error); });
       child.on('exit', () => { this.broken = true; this.failAll(new Error('vortexd exited')); });
       child.stderr.on('data', () => {}); // diagnostics only; never parsed
@@ -115,6 +120,28 @@ export class CodeGraph {
     if (/^\s*Error:/.test(text)) throw new Error(text.slice(0, 200));
     try { return JSON.parse(text) as Record<string, unknown>; }
     catch { throw new Error('unparseable intelligence response'); }
+  }
+
+  /**
+   * Make sure this workspace HAS an index, and say what state it is in.
+   *
+   * Indexing a large repo takes minutes, so `start_indexing` is kicked off and
+   * NOT waited on: the caller falls back to text search until the walk lands.
+   * Blocking a write for minutes to build an index would be a worse failure
+   * than the missing caller it is trying to prevent.
+   */
+  async ensureIndexed(path: string): Promise<'indexed' | 'indexing' | 'unavailable'> {
+    try {
+      await this.intelligence('index_stats', { path });
+      return 'indexed';
+    } catch (error) {
+      const message = String((error as Error).message ?? '');
+      if (!/workspace_not_indexed/.test(message)) return 'unavailable';
+      try {
+        await this.intelligence('start_indexing', { path });
+        return 'indexing';
+      } catch { return 'unavailable'; }
+    }
   }
 
   /** Keep the graph current while the agent edits. Best effort: never throws. */

@@ -1,9 +1,10 @@
+import {writeFileSync} from 'node:fs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type {ExtensionAPI,ExtensionContext} from '@earendil-works/pi-coding-agent';
 import type {AssistService} from '../src/service.js';
 import {installAssist} from '../index.js';
-function harness(evaluate:AssistService['evaluate'], hasUI=false) {
+function harness(evaluate:AssistService['evaluate'], hasUI=false, graph?:unknown) {
  const handlers=new Map<string,(event:never,ctx:ExtensionContext)=>unknown>();
  const entries:unknown[]=[]; const messages:Array<{message:unknown;options:unknown}>=[];
  let command:((args:string,ctx:ExtensionContext)=>Promise<void>)|undefined;
@@ -11,7 +12,11 @@ function harness(evaluate:AssistService['evaluate'], hasUI=false) {
  const widgets:unknown[]=[];
  const ctx={hasUI,isIdle:()=>true,ui:{setWidget:(_key:string,value:unknown)=>widgets.push(value),setStatus:()=>{},notify:()=>{}}} as unknown as ExtensionContext;
  const service={evaluate,usage:()=>({requests:0,inputTokens:0,outputTokens:0,failures:0}),beginRun:()=>{}} as AssistService;
- installAssist(pi,{service,readEnabled:()=>true,saveEnabled:()=>{}});
+ // Always inject a graph. Without one the extension spawns a REAL `vortexd --mcp`
+ // child at session_start, which is both slow and (before it was unref'd) kept
+ // the test process alive forever.
+ const inert={ensureIndexed:async()=>'unavailable',watch:async()=>false,findSymbol:async()=>undefined,blastRadius:async()=>{throw new Error('no graph in tests');},dispose:()=>{}};
+ installAssist(pi,{service,readEnabled:()=>true,saveEnabled:()=>{},graph:(graph??inert) as never});
  const emit=(name:string,event:unknown={})=>Promise.resolve(handlers.get(name)?.(event as never,ctx));
  return {emit,entries,messages,widgets,command:(args:string)=>command!(args,ctx)};
 }
@@ -22,7 +27,7 @@ async function evidence(h:ReturnType<typeof harness>) {
  await h.emit('tool_execution_end',{toolCallId:'c1',toolName:'bash',result:{content:[{type:'text',text:'failure'}],details:{exitCode:1}},isError:true});
  await h.emit('message_end',{message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'Fixed and all tests passed.'}]}});
 }
-test('automatic advice uses live catalogue and settled evidence, never triggers a new turn',async()=>{
+test('automatic advice uses live catalogue and settled evidence, and wakes the agent when it speaks',async()=>{
  const requests:unknown[]=[];
  const h=harness(async req=>{requests.push(req);return requests.length===1?ok({s0:{noul:0.98}}):ok({claims_verified:{noul:0.98},unsupported_verification:{noul:0.99}});});
  await h.emit('session_start');
@@ -30,7 +35,9 @@ test('automatic advice uses live catalogue and settled evidence, never triggers 
  assert.match(skills.message.content,/\/skills\/testing\/SKILL.md/);
  await evidence(h); await h.emit('agent_settled'); await h.emit('agent_settled');
  assert.equal(requests.length,2); assert.equal(h.messages.length,1);
- assert.deepEqual(h.messages[0].options,{triggerTurn:false});
+ // Changed deliberately: triggerTurn:false lands after the turn ends, so nothing
+ // acts on it. Measured being ignored twice in one real session.
+ assert.deepEqual(h.messages[0].options,{triggerTurn:true});
  assert.ok(!JSON.stringify(h.entries).includes('Fixed and all tests passed.'));
 });
 test('a conversation-only new run clears the prior warning widget',async()=>{
@@ -91,6 +98,95 @@ test('compaction falls back to Pi whenever it cannot do better',async()=>{
  assert.equal(await noTools.emit('session_before_compact',{preparation:{firstKeptEntryId:'e1',tokensBefore:1,isSplitTurn:false,
   messagesToSummarize:[{role:'user',content:[{type:'text',text:'just talking'}]}]}}),undefined);
 });
+const fakeGraph=(callers:unknown[],opts:{fail?:boolean}={})=>({
+ ensureIndexed:async()=>opts.fail?'unavailable':'indexed',
+ watch:async()=>!opts.fail,
+ findSymbol:async()=>opts.fail?undefined:'f::sym',
+ blastRadius:async()=>{ if(opts.fail) throw new Error('workspace_not_indexed'); return {callers}; },
+ dispose:()=>{},
+} as any);
+
+test('a write is speed-bumped once with the callers that depend on it',async()=>{
+ const h=harness(async()=>ok({}),false,fakeGraph([{symbol:'attachBlob',path:'packages/files/src/attach.ts',depth:1}]));
+ await h.emit('session_start',{reason:'startup'});
+ const file='src/x.ts';
+ writeFileSync('/tmp/jev-prewrite.ts','export function doThing() {}\n');
+ const first=await h.emit('tool_call',{toolName:'write',toolCallId:'c1',input:{path:'/tmp/jev-prewrite.ts'}}) as {block?:boolean;reason?:string}|undefined;
+ assert.equal(first?.block,true);
+ assert.match(first!.reason!,/1 caller\(s\) depend/);
+ assert.match(first!.reason!,/attachBlob/);
+ assert.match(first!.reason!,/fires once per file/);
+ // Re-issuing the same edit proceeds: a speed bump, not a gate.
+ const second=await h.emit('tool_call',{toolName:'write',toolCallId:'c2',input:{path:'/tmp/jev-prewrite.ts'}});
+ assert.equal(second,undefined);
+ assert.equal(String(file),'src/x.ts');
+});
+
+test('the pre-write check fails OPEN and ignores non-code files',async()=>{
+ // A down graph, a missing index or a slow daemon must never stop an edit.
+ const broken=harness(async()=>ok({}),false,fakeGraph([],{fail:true}));
+ await broken.emit('session_start',{reason:'resume'});
+ writeFileSync('/tmp/jev-prewrite2.ts','export function other() {}\n');
+ assert.equal(await broken.emit('tool_call',{toolName:'write',toolCallId:'c1',input:{path:'/tmp/jev-prewrite2.ts'}}),undefined);
+
+ const ok2=harness(async()=>ok({}),false,fakeGraph([{symbol:'a',path:'b.ts',depth:1}]));
+ await ok2.emit('session_start',{reason:'startup'});
+ // Not code: never bumped, never queried.
+ assert.equal(await ok2.emit('tool_call',{toolName:'write',toolCallId:'c2',input:{path:'notes.md'}}),undefined);
+ // Not a write: a read is not a change.
+ assert.equal(await ok2.emit('tool_call',{toolName:'read',toolCallId:'c3',input:{path:'/tmp/jev-prewrite.ts'}}),undefined);
+});
+
+test('a resumed session re-bootstraps and clears prior speed bumps',async()=>{
+ const h=harness(async()=>ok({}),false,fakeGraph([{symbol:'a',path:'b.ts',depth:1}]));
+ await h.emit('session_start',{reason:'startup'});
+ writeFileSync('/tmp/jev-prewrite3.ts','export function third() {}\n');
+ assert.equal(((await h.emit('tool_call',{toolName:'edit',toolCallId:'c1',input:{path:'/tmp/jev-prewrite3.ts'}})) as {block?:boolean})?.block,true);
+ // Resume: the same file must be bumped again, because bumps are per session.
+ await h.emit('session_start',{reason:'resume'});
+ assert.equal(((await h.emit('tool_call',{toolName:'edit',toolCallId:'c2',input:{path:'/tmp/jev-prewrite3.ts'}})) as {block?:boolean})?.block,true);
+});
+
+test('a flagged review WAKES the agent, and cannot loop',async()=>{
+ // triggerTurn:false lands after the turn ends, so nothing acts on it: observed
+ // being ignored twice in one real session while the flagged claim was in fact
+ // unevidenced. A flag must interrupt; the run it starts must not flag again.
+ const flag=()=>ok({claims_verified:{noul:0.95},unsupported_verification:{noul:0.95}});
+ const h=harness(async()=>flag());
+ await h.emit('session_start',{reason:'startup'});
+ await h.emit('before_agent_start',before); await evidence(h); await h.emit('agent_settled');
+ assert.equal(h.messages.length,1);
+ assert.deepEqual(h.messages[0].options,{triggerTurn:true},'a flagged review must wake the agent');
+ assert.match(String((h.messages[0].message as {content:string}).content),/Acknowledge each point above/,'it must demand engagement, not offer a banner');
+
+ // The run our wake started: it reviews, but must not wake another.
+ await h.emit('before_agent_start',before); await evidence(h); await h.emit('agent_settled');
+ assert.equal(h.messages.length,2);
+ assert.deepEqual(h.messages[1].options,{triggerTurn:false},'the run we started cannot wake another');
+});
+
+test('an unflagged review says nothing at all',async()=>{
+ // The ranking of the assistant's own sentences used to print every turn. Chrome
+ // is why the banner got ignored.
+ const h=harness(async()=>ok({support_0:{noul:0.9},impact_0:{score:1}}));
+ await h.emit('session_start',{reason:'startup'});
+ await h.emit('before_agent_start',before); await evidence(h); await h.emit('agent_settled');
+ assert.equal(h.messages.length,0,'no flag means no message');
+});
+
+test('a flagged review names the command to re-run',async()=>{
+ const h=harness(async()=>ok({claims_verified:{noul:0.95},unsupported_verification:{noul:0.95}}));
+ await h.emit('session_start',{reason:'startup'});
+ await h.emit('before_agent_start',before);
+ await h.emit('tool_execution_start',{toolCallId:'c9',toolName:'bash',args:{command:'bun test src/capture/__tests__/join.test.ts'}});
+ await h.emit('tool_execution_end',{toolCallId:'c9',toolName:'bash',result:{content:[{type:'text',text:'66 pass'}],details:undefined},isError:false});
+ await h.emit('message_end',{message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'All 66 tests pass and typecheck is clean.'}]}});
+ await h.emit('agent_settled');
+ const content=String((h.messages[0].message as {content:string}).content);
+ assert.match(content,/Re-run and report the exit code/);
+ assert.match(content,/join\.test\.ts/);
+});
+
 test('off switch prevents calls, not just visible advice',async()=>{
  let calls=0; const h=harness(async()=>{calls++;return ok({});}); await h.emit('session_start'); await h.command('off');
  await h.emit('before_agent_start',before); await evidence(h); await h.emit('agent_settled'); assert.equal(calls,0);
@@ -99,7 +195,10 @@ test('late skill response after shutdown cannot inject or persist',async()=>{
  let resolve!:(value:ReturnType<typeof ok>)=>void;
  const h=harness(()=>new Promise(r=>{resolve=r;})); await h.emit('session_start');
  const pending=h.emit('before_agent_start',before); await h.emit('session_shutdown'); resolve(ok({s0:{noul:1}}));
- assert.equal(await pending,undefined); assert.equal(h.entries.length,0);
+ assert.equal(await pending,undefined);
+ // session_start now records an index-bootstrap entry, so assert on the SKILL
+ // stage rather than on total silence.
+ assert.equal(h.entries.filter((e:any)=>e.stage==='skills').length,0);
 });
 test('tree navigation invalidates pending review and output',async()=>{
  let call=0; let resolve!:(value:ReturnType<typeof ok>)=>void;

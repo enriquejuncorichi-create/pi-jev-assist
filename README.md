@@ -1,82 +1,177 @@
-# Automatic Jev advice for Enrique's Pi
+# pi-jev-assist
 
-Personal integration built on **pi-typesafe 0.4.0** and selected **pi-warden 0.12.0** library components. It does not load their standalone extensions, replace existing Jev CLI/gates, change tool permissions or modify CCD Platform.
+A [Pi](https://github.com/earendil-works/pi-mono) extension that checks an agent's
+work against **observation** rather than against its own account of itself.
 
-## What runs automatically
+It runs by itself. There is nothing to invoke, no slash command to remember, and
+no prompt to write. It watches a session, and when it has something worth saying
+it says it — and when it does not, it stays silent.
 
-1. **Skill suggestions** before each run, from `systemPromptOptions.skills` (the real Pi catalogue). Command-only skills are excluded. Up to two candidates above 0.90 are suggested; the agent still reads the skill and applies existing instructions. No-match is valid. More than 128 skills means an explicit skip, not a hidden shortlist. Large requests are refused by the client budget.
-2. **Evidence-grounded finding triage** after the run settles. Up to six finding-like paragraphs in the final response are treated as *claims*, compared with bounded tool observations, and ranked by evidence support before impact. This is heuristic paragraph selection, not a comprehensive review or bug finder. It cannot inspect background reports that never entered tool output.
-3. **Post-run trace advice** after `agent_settled`: possible unsupported verification/completion claims and repeated failed strategies. Warden's completion-language and stuck-strategy questions are reused with their expected state fields; the surrounding evidence policy is deliberately different. No command output is automatically treated as proof of correctness.
-
-A visible custom advisory message and widget appear when there is advice or a finding ranking. Successful evaluations with no flags do **not** emit a "verified" verdict. Custom messages use `triggerTurn: false`: no automatic repair loop or extra generative-model turn. Advice remains available to the next ordinary turn. Service failures mean *unavailable*, never *clear*.
-
-## Controls
-
-- `/jev-assist status` — mode and session usage.
-- `/jev-assist off` — immediately cancel pending judgments and persist off globally.
-- `/jev-assist on` — persist on globally.
-- `PI_JEV_ASSIST=off` — process-level kill switch, cannot be overridden by the command.
-- State file: `~/.pi/agent/jev-assist/config.json` (only an enabled boolean).
-- The global loader lives in `~/.pi/agent/extensions/jev-assist/index.ts`; remove that loader to uninstall. Source/dependencies can remain for inspection.
-
-Automation is enabled by default when installed, as explicitly requested by the user. Changing configuration does not grant permission to execute an action. No project configuration is read.
-
-## Reused versus retained
-
-| Component | Decision |
-| --- | --- |
-| pi-typesafe client | Reuse validated responses, typed primitives, pinned official API destination, no SDK retries and usage accounting. |
-| pi-warden redaction | Reuse, but apply to complete strings **before** clipping. It is best-effort, not a secret-proof boundary. |
-| pi-warden completion/stuck questions | Reuse as semantic signals, not execution facts or completion authority. |
-| pi-warden done outcome classifier | Do not use: command-text matching and any-passing-check policy do not meet this integration's conservative evidence requirements. This integration draws no pass/fail conclusion at all. |
-| pi-warden action guards/output compression | Not enabled. Existing permissions and original tool output remain unchanged. |
-| Existing `jev`, `jev-gate`, `jev-claims` | Retain unchanged. This extension does not satisfy required project verification gates. |
-| pi-jev | Reviewed as a discovery design reference; not loaded. No second client, overlapping hooks or fallback confidence of 1.0. |
-
-Warden declares pi-typesafe ^0.3.0. This package deliberately overrides it to 0.4.0 to avoid duplicate clients/type identities. Run the upstream offline compatibility tests before accepting an upgrade. The Bun lockfile pins the installed dependency graph. No upstream lifecycle scripts are needed to install the published packages.
-
-## Evidence and privacy
-
-Automatically sends to TypeSafe's hosted API:
-
-- Redacted task excerpt (up to 4,000 characters).
-- Advertised skill names/descriptions, not full skill files or the system prompt.
-- Final assistant text excerpt (up to 5,000 characters), labelled as a claim.
-- Bounded recent tool call summaries and output excerpts, plus counts of file writes and unknown-effect tool calls.
-- Fixed judgment questions, including attributed Warden rubrics.
-
-Does **not** read the repository or previous session files, forward reasoning blocks/images/full telemetry, fetch arbitrary files, or send full AGENTS.md. Sensitive-path operations and credential-dumping commands are withheld by the ledger. Redaction is best-effort: arbitrary secrets, private business data and personal information may still occur in otherwise ordinary code/output. Use the kill switch before sensitive work. "Not used for training" does not imply zero retention; confirm account terms separately.
-
-The ledger stores bounded redacted observations in memory. Durable decision entries store hashes, numeric judgments, static flags, model, latency, usage and omission counts—not raw request payloads. Displayed finding excerpts/custom advice are redacted, but still become part of Pi's ordinary session history.
-
-**There is no check/pass layer, deliberately.** An earlier version classified recognised commands as passed/failed using `details.exitCode` and tracked freshness against mutations. Measured against a real recorded session, that machinery never fired: Pi's bash tool emits no exit code (`dist/core/tools/bash.js` populates `details` only for truncation), and real agent commands are compound (`cd x && node --test | tail -25`), which the recogniser correctly refused. Its unit tests passed only because they supplied `{exitCode: 0}` themselves — an input the runtime never produces. It was removed rather than kept as dead code with green tests.
-
-What remains: an observation's `status` is `error` when Pi sets `isError`, otherwise `ok`, and `ok` means only "the tool did not report an error" — never "the checks passed". The snapshot exposes no pass/fail verdict, so no consumer can mistake one for the other. Any judgment about whether a command demonstrates working code is made by the judge from the command text and its output, both treated as untrusted. These observations are not attestation or comprehensive caller coverage.
-
-Limits: 120 ledger entries, last 12 observations in a review, six candidate paragraphs. Omitted coverage is reported. Missing evidence weakens advice; it is not proof of a defect. Thresholds are uncalibrated for this user's tasks.
-
-## Credentials and reliability
-
-Use the existing TypeSafe key; do not duplicate it into Pi settings. The service supports the environment/upstream key store and the existing owner-only `~/.config/typesafe/env` via strict literal parsing—not shell execution. No credentials are displayed, stored in decision entries or passed in argv.
-
-Model: `jev-1.13.0`. Requests: 2.5-second deadline, no retries, 48,000-byte request cap, six attempts/run, 300/session. Three service failures open a 60-second circuit breaker. The process/session budget is not reset by each prompt. Abort and generation checks prevent late responses from affecting a new prompt, branch, disabled extension or shut-down session. Reload creates a new extension instance/budget.
-
-Usage is shown separately by `/jev-assist status` and stored with decisions. It is not automatically added to the generative model's Pi token totals. At the researched $0.042/M input-token rate, inputTokens * 0.042 / 1,000,000 estimates Jev cost; account pricing is authoritative.
-
-## Validation
-
-```sh
-bun install --ignore-scripts
-bun run check
-# When the pinned upstream source snapshots are available under vendor/:
-(cd vendor/pi-typesafe && node --import tsx --test tests/*.test.ts)
-(cd vendor/pi-warden && node --import tsx --test tests/*.test.ts)
+```
+enumerate mechanically  →  classify with Jev  →  you decide
+   git, ripgrep,            small, self-contained     authority never
+   a call graph             items; abstention          moves
+                            is a first-class answer
 ```
 
-Offline tests exercise the real Pi resource loader, mocked event lifecycles, missing/late responses, budgets, evidence limitations and synthetic secrets. A separate synthetic live smoke may verify credentials and the API without sending repository content. Neither proves that advice improves task success. Keep user overrides and real false-positive examples for later evaluation.
+That shape is not an aesthetic preference. It is the conclusion of a day of
+measurement, recorded in [docs/measurements.md](docs/measurements.md): **every
+tool built here that asked Jev to FIND something failed its own known-bad case,
+and every tool that asked it to RANK or SCORE pre-enumerated evidence
+discriminated cleanly.** Four failures, three successes, split exactly on that
+line.
 
-## Tool discovery (option 4)
+---
 
-Do not turn every inactive tool back on: users or other extensions may have disabled it deliberately. Prefer a loader that searches only an explicitly approved discovery catalogue and additively activates selected registered tools during the loader call. Pi documents availability on the following model request, with native deferred-loading support where available.
+## What it does
 
-For MCP multiplexers, a Pi tool name such as `mcp` is not a catalogue of underlying operations. Use the gateway's search/describe facility to discover those operations instead of claiming `setActiveTools` can select them. Keep basic tools and search available; distinguish missing capability from no semantic match; allow abstention. No discovery activation is implemented in this first release. A future loader must revalidate provenance, session identity and current eligibility immediately before activation; a fresh union alone does not solve concurrent permission revocation. It must never install or authenticate an MCP server, execute the discovered action, or treat Jev relevance as permission.
+| When | What happens | Cost |
+| --- | --- | --- |
+| Session starts | Ensures the workspace has a Vortex code index; starts a file watcher | Off the critical path |
+| Before a run | Scores Pi's **live** skill catalogue against your prompt, suggests ≤2 above 0.90 | 1 Jev call |
+| Before a write | Names the callers that depend on the file you are about to change | 1 graph call, sub-second |
+| Every tool call | Records a redacted, bounded evidence ledger | None |
+| Run settles | Reviews the final message against that evidence; checks its claims against the diff; ranks callers of what changed | ≤3 Jev calls |
+| Compaction | Prunes finished tool output **verbatim** instead of summarising | 1–2 Jev calls |
+
+Everything is advisory. It never grants a permission, never certifies
+completion, never starts a follow-up turn, and never edits your code.
+
+### Skill suggestions
+
+Scores the skills Pi is actually advertising this run (`event.systemPromptOptions.skills`)
+rather than scanning a directory that may not be the one in use. Only skills the
+model could already invoke are ever suggested, and only their name and path are
+injected — never model-authored instructions.
+
+### Pre-write blast radius
+
+`tool_call` fires before a tool runs and can block, so this is the only point
+where the caller list arrives **before** the change rather than after it.
+
+Broken or unconsidered callers are the largest class of *blocking* review finding
+measured over 1,252 real review comments: **13 of 108 blockers, 12%**. That is a
+planning failure, and a diff-seeded answer arrives too late to prevent it.
+
+It is a **speed bump, not a gate** — once per file per session, and only when the
+graph actually names callers. Re-issue the edit and it proceeds. It **fails open**
+on every error: a missing index, a slow daemon or an unindexed workspace must
+never stop an edit. A check that blocks work when its own infrastructure is down
+gets uninstalled, and deserves to be.
+
+### Evidence review and claim checking
+
+At `agent_settled` the final message is checked two ways:
+
+- against the **evidence ledger** — what was actually run, with what output
+- against the **working-tree diff** — does the code do what the message says?
+
+The second is deliberately better evidence than a hand-written claim: your own
+summary of your own work scores well and proves nothing. A diff is an
+observation.
+
+**The hard limit, stated where it cannot be missed: a diff shows what the code
+SAYS, never that it WORKS.** Tests remain the only authority on behaviour.
+
+### Verbatim compaction
+
+Pi's default compaction asks a model to summarise the messages it discards, and a
+summary loses exactly the thing that matters later: an exact path, an error
+string, a constraint. This selects instead of rewriting — survivors are
+reproduced byte-for-byte, and dropped tool output becomes a one-line note naming
+what went.
+
+Measured on a real 60-message session: **130,464 → 23,921 characters, 81.7%
+smaller**, with the user's constraints intact word for word.
+
+It falls back to Pi's own summariser whenever the saving is under 25%, Jev fails,
+the span is a split turn, or there is no tool output to prune. **A text-heavy span
+has nothing to prune, so the fallback is the normal case, not an edge case.**
+
+---
+
+## Install
+
+```sh
+git clone <this repo> ~/Projects/pi-jev-assist
+cd ~/Projects/pi-jev-assist && bun install
+ln -s ~/Projects/pi-jev-assist ~/.pi/agent/extensions/jev-assist
+```
+
+Set a TypeSafe API key as `TYPESAFE_API_KEY`, or leave one at
+`~/.config/typesafe/env` (owner-only, `KEY=value`, no shell expansion — it is
+parsed, never sourced).
+
+Restart Pi. `/jev-assist status` confirms it is live.
+
+The symlink points at the working tree, so **an edit here is live in the next
+session with no build step**.
+
+### Controls
+
+| | |
+| --- | --- |
+| `/jev-assist status` | Model, usage, on/off |
+| `/jev-assist off` | Persisted to `~/.pi/agent/jev-assist/config.json` |
+| `PI_JEV_ASSIST=off` | Environment kill switch; wins over the config file |
+| `rm ~/.pi/agent/extensions/jev-assist` | Gone |
+
+### Optional: the Vortex code graph
+
+If [Vortex](https://github.com/enriquejuncorichi-create/vortex-rust-native) is
+installed, blast radius comes from a real call graph — transitive `Calls` edges,
+reaching callers that never mention the symbol. Without it, a bundled ripgrep
+script covers the same ground textually, and says so.
+
+Nothing breaks without Vortex. See [docs/vortex.md](docs/vortex.md).
+
+---
+
+## Bounds
+
+Every hosted request is bounded, and the bounds are tested:
+
+- **2.5 s** deadline, no retries
+- **48,000 bytes** per request, checked on the serialised body
+- **6 calls per run**, **300 per session**
+- **circuit breaker** — three consecutive failures open it for 60 s
+- **redaction before clipping**, so a secret cannot survive by being truncated
+  into a shorter string
+- sensitive paths (`.env`, `auth.json`, `.ssh/`, `*.pem`, credentials) are
+  **never** sent — not their contents, not their command lines
+- nothing is written to disk except decision metadata: hashes, scores, counts
+
+---
+
+## Documentation
+
+| Document | Contents |
+| --- | --- |
+| [docs/architecture.md](docs/architecture.md) | Every hook, what it does, what it costs, and why it is where it is |
+| [docs/measurements.md](docs/measurements.md) | What was measured, including everything that failed |
+| [docs/vortex.md](docs/vortex.md) | The code-graph integration and its failure modes |
+| [docs/limitations.md](docs/limitations.md) | What this cannot do, and the known false positives |
+| [UPSTREAM.md](UPSTREAM.md) | Provenance for the ideas taken from other projects |
+
+---
+
+## Development
+
+```sh
+bun run check      # typecheck + 90 tests
+bun run typecheck
+bun run test
+```
+
+Tests are `node:test`, no network. The live checks are separate scripts under
+`scripts/`, each of which talks to the real API and says so.
+
+**If you change a check, prove the test catches it.** Delete or invert the thing
+it guards and confirm the suite goes red. Three of this project's own bugs passed
+a green suite: a ripgrep invocation that read stdin instead of the filesystem, a
+negation that inverted a claim check, and a request that exceeded a question
+ceiling. All three were invisible to tests and obvious on first real contact.
+
+## Licence
+
+MIT. Vendored dependencies keep their own licences in `licenses/`.

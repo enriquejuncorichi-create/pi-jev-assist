@@ -17,8 +17,8 @@
  * nothing at all rather than a degraded answer.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
 import { clean, probability } from './decisions.js';
 
 export const MAX_DIFF_BYTES = 24_000;
@@ -80,6 +80,26 @@ export function changedSymbols(diff: string): string[] {
     const match = /^\+\s*(?:export\s+)?(?:async\s+)?(?:function|const|class|interface|type)\s+([A-Za-z_][A-Za-z0-9_]*)/.exec(line)
       ?? /^\+\s*(?:public|private|protected)?\s*(?:async\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(/.exec(line);
     if (match?.[1] && match[1].length > 2) names.add(match[1]);
+  }
+  return [...names];
+}
+
+/**
+ * What a file currently EXPORTS, read from disk before an edit lands.
+ *
+ * The pre-write check runs before the change, so there is no diff to read: the
+ * question is "who depends on this file as it stands", not "what did I just
+ * change". A file that does not exist yet has no dependants, which is why a
+ * failed read yields nothing rather than an error.
+ */
+export function exportedSymbolsOf(target: string, cwd: string): string[] {
+  let source = '';
+  try { source = readFileSync(isAbsolute(target) ? target : join(cwd, target), 'utf8'); }
+  catch { return []; }
+  const names = new Set<string>();
+  const pattern = /^\s*export\s+(?:async\s+)?(?:function|const|class|interface|type)\s+([A-Za-z_][A-Za-z0-9_]*)/gm;
+  for (const match of source.matchAll(pattern)) {
+    if (match[1] && match[1].length > 2) names.add(match[1]);
   }
   return [...names];
 }
