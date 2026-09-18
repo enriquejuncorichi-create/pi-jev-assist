@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { skillRequest, selectedSkills, reviewRequest, reviewAdvice, clean, probability, certainty, IncompleteAnswersError, GAPS } from '../src/decisions.js';
+import { skillRequest, selectedSkills, reviewRequest, reviewAdvice, reviewable, clean, probability, certainty, IncompleteAnswersError, GAPS } from '../src/decisions.js';
 import { doneQuestions, stuckQuestions } from 'pi-warden';
 const skill={name:'testing',description:'Run and interpret tests',filePath:'/skills/testing/SKILL.md'};
 test('skills use advertised catalogue only, preserving real filePath',()=>{
@@ -20,6 +20,20 @@ test('uses upstream warden questions with matching state keys',()=>{
  assert.deepEqual(p.request.questions.same_strategy,stuckQuestions.same_strategy);
  const state=p.request.state as Record<string,unknown>; assert.equal(state.final_message,'Risk: failed tests'); assert.ok(state.attempts);
 });
+test('a wrap-up with no check, mutation or work-tool error is not reviewable',()=>{
+ const obs=(tool:string,call:string,status:'ok'|'error'='ok')=>({id:tool,tool,call,output:'x',status,mutation:false,sequence:1});
+ assert.equal(reviewable('Repo is live. 96 tests green.',{observations:[obs('bash','git log --oneline'),obs('read','README.md')],mutations:0}),false);
+ assert.equal(reviewable('All 66 tests pass.',{observations:[obs('bash','bun test src/join.test.ts')],mutations:0}),true);
+ assert.equal(reviewable('Done.',{observations:[obs('bash','false','error')],mutations:0}),true);
+ assert.equal(reviewable('Pushed.',{observations:[],mutations:1}),true);
+ assert.equal(reviewable('Done.',{observations:[obs('bg_run','timeout','error')],mutations:0}),false);
+});
+
+test('unresolved-failure flag needs a work-tool error, not just completion language',()=>{
+ const answers={claims_done:{noul:0.95},unresolved_failure:{noul:0.9},claims_verified:{noul:0.95},unsupported_verification:{noul:0.9},verification_applies:{noul:0.1}};
+ assert.equal(reviewAdvice(answers,[],false,false).flags.length,0);
+});
+
 test('no positive verification verdict and missing answers do not become warnings',()=>{
  assert.deepEqual(reviewAdvice({},[]),{flags:[],ranking:[],unassessable:0});
  const advice=reviewAdvice({claims_done:{noul:0.95},unresolved_failure:{noul:0.9}},[]);

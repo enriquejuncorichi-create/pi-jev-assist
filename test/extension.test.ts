@@ -165,6 +165,21 @@ test('a flagged review WAKES the agent, and cannot loop',async()=>{
  assert.deepEqual(h.messages[1].options,{triggerTurn:false},'the run we started cannot wake another');
 });
 
+test('a wrap-up with git/gh and no check does not review at all',async()=>{
+ // Observed: every turn that said "done" / "96 tests green" posted both flags
+ // after only git/gh/bg_logs ran. The classifiers score prose, not the ledger.
+ let reviews=0;
+ const h=harness(async req=>{ if('unsupported_verification' in (req as {questions:object}).questions) reviews++; return ok({claims_verified:{noul:0.99},unsupported_verification:{noul:0.99},claims_done:{noul:0.99},unresolved_failure:{noul:0.99}}); });
+ await h.emit('session_start',{reason:'startup'});
+ await h.emit('before_agent_start',before);
+ await h.emit('tool_execution_start',{toolCallId:'g',toolName:'bash',args:{command:'git log --oneline'}});
+ await h.emit('tool_execution_end',{toolCallId:'g',toolName:'bash',result:{content:[{type:'text',text:'abc'}],details:undefined},isError:false});
+ await h.emit('message_end',{message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'Everything is pushed. 96 tests green. Repo is live.'}]}});
+ await h.emit('agent_settled');
+ assert.equal(reviews,0,'must not even call Jev');
+ assert.equal(h.messages.length,0);
+});
+
 test('an unflagged review says nothing at all',async()=>{
  // The ranking of the assistant's own sentences used to print every turn. Chrome
  // is why the banner got ignored.

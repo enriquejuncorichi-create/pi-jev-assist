@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { EvidenceLedger } from './src/evidence.js';
 import { createService, type AssistService } from './src/service.js';
-import { ADVISORY, POLICY_VERSION, clean, digest, probability, skillRequest, selectedSkills, reviewRequest, reviewAdvice, IncompleteAnswersError, type Request } from './src/decisions.js';
+import { ADVISORY, POLICY_VERSION, clean, digest, probability, skillRequest, selectedSkills, reviewRequest, reviewAdvice, reviewable, IncompleteAnswersError, type Request } from './src/decisions.js';
 import { collectCalls, pinnedIds, buildState, questionsFor, batchCalls, decide, render, reductionRatio, type Decision } from './src/compaction.js';
 import { workingDiff, claimsFrom, claimQuestions, claimAdvice, buildClaimState, enumerateCallers, parseCallers, callerQuestions, changedSymbols, exportedSymbolsOf, MAX_CALLERS } from './src/autonomous.js';
 import { CodeGraph, type GraphCaller } from './src/codegraph.js';
@@ -233,6 +233,14 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
     reviewed=g;
     const evidence=ledger.snapshot();
     if (!evidence.observations.length) return; // Conversation-only turns have no execution evidence to audit.
+    // Do not spend a Jev call — or post a banner — on wrap-up prose. Observed:
+    // "96 tests green" after a git/gh turn fired both completion flags every
+    // time. The classifiers score the assistant's language, not the ledger.
+    if (!reviewable(finalText, evidence)) {
+      if(ctx.hasUI) ctx.ui.setWidget('jev-assist',undefined);
+      pi.appendEntry('jev-assist-decision',{policy:POLICY_VERSION,stage:'review',status:'skipped',reason:'nothing reviewable this generation'});
+      return;
+    }
     const prepared=reviewRequest(task,finalText,evidence);
     status(ctx,'Jev · reviewing evidence');
     const result=await service.evaluate(prepared.request,controller.signal);
@@ -244,7 +252,7 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
       return;
     }
     let advice;
-    try { advice=reviewAdvice(result.answers,prepared.candidates,prepared.exitsRecorded); }
+    try { advice=reviewAdvice(result.answers,prepared.candidates,prepared.exitsRecorded,prepared.hadWorkError); }
     catch (error) {
       // An omitted answer is a service fault, not an abstention; say so rather
       // than silently dropping the finding it belonged to.

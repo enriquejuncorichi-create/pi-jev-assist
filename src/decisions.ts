@@ -70,11 +70,31 @@ export function exitEvidence(observations: readonly {output: string}[]): boolean
   return observations.some(o => EXIT_MARKER.test(o.output));
 }
 
+const CHECK_COMMAND = /\b(test|typecheck|lint|check|build)\b/i;
+const VERIFY_LANGUAGE = /\b(pass(?:ed|ing)?|fail(?:ed|ing)?|green|typecheck|tests?\b|lint\b|tsc\b)\b/i;
+const WORK_TOOLS = new Set(['bash','write','edit']);
+
+/**
+ * Whether this generation produced anything a review could possibly catch.
+ *
+ * Observed: every wrap-up that said "done" or "96 tests green" — including
+ * turns that only ran `git`/`gh`/`bg_logs` — fired both Warden completion
+ * flags, because those classifiers score the assistant's prose, not the
+ * ledger. A banner on every turn is chrome. Silence unless this run mutated
+ * files, ran a check, or had a work-tool error.
+ */
+export function reviewable(finalText: string, evidence: Pick<EvidenceSnapshot,'observations'|'mutations'>): boolean {
+  if (evidence.mutations > 0) return true;
+  const work = evidence.observations.filter(o => WORK_TOOLS.has(o.tool));
+  if (work.some(o => o.status === 'error')) return true;
+  return work.some(o => o.tool === 'bash' && CHECK_COMMAND.test(o.call)) && VERIFY_LANGUAGE.test(finalText);
+}
+
 export function findingCandidates(text: string): {candidates: ReviewCandidate[]; omitted: number} {
   const paragraphs = text.split(/\n\s*\n/).map(p => p.trim()).filter(p => /\b(?:P[0-3]|finding|bug|defect|regression|vulnerability|risk|broken|fails?)\b/i.test(p));
   return { candidates: paragraphs.slice(0, 6).map((p,i) => ({id: `f${i}`, claim: clean(p, 1200)})), omitted: Math.max(0, paragraphs.length - 6) };
 }
-export function reviewRequest(task: string, finalText: string, evidence: EvidenceSnapshot): {request: Request; candidates: ReviewCandidate[]; omitted: number; exitsRecorded: boolean} {
+export function reviewRequest(task: string, finalText: string, evidence: EvidenceSnapshot): {request: Request; candidates: ReviewCandidate[]; omitted: number; exitsRecorded: boolean; hadWorkError: boolean} {
   const {candidates, omitted} = findingCandidates(finalText);
   const observations = evidence.observations.slice(-12);
   const state = {
@@ -107,7 +127,8 @@ export function reviewRequest(task: string, finalText: string, evidence: Evidenc
     // A bounded choice from a fixed list: a reason without model-authored prose.
     questions[`gap_${i}`] = {type:'choice',instructions:`What is the single most consequential evidence gap for findings[${i}].claim? Choose no_material_gap when the observations genuinely cover it. Do not speculate beyond the state.`,criteria:GAPS};
   }
-  return {request:{state,questions}, candidates, omitted, exitsRecorded: exitsPresent};
+  const hadWorkError = observations.some(o => WORK_TOOLS.has(o.tool) && o.status === 'error');
+  return {request:{state,questions}, candidates, omitted, exitsRecorded: exitsPresent, hadWorkError};
 }
 export const GAPS: Record<string,string> = {
   no_material_gap: 'The observations cover this claim.',
@@ -119,10 +140,14 @@ export const GAPS: Record<string,string> = {
   stale: 'The covering observation predates a later change.',
 };
 export interface Ranked { id: string; supported: number; impact: number; confidence: number; gap?: string }
-export function reviewAdvice(answers: Record<string, unknown>, candidates: readonly ReviewCandidate[], exitsRecorded = false): {flags: string[]; ranking: Ranked[]; unassessable: number} {
+export function reviewAdvice(answers: Record<string, unknown>, candidates: readonly ReviewCandidate[], exitsRecorded = false, hadWorkError = true): {flags: string[]; ranking: Ranked[]; unassessable: number} {
   const flags: string[] = [];
-  if ((probability(answers.unsupported_verification) ?? 0) >= 0.75 && (probability(answers.claims_verified) ?? 0) >= 0.7) flags.push(`Possible unsupported verification claim: re-read the matching command and its output, and check scope and revision, before relying on it.${exitsRecorded ? '' : ' No exit status is recorded.'}`);
-  if ((probability(answers.unresolved_failure) ?? 0) >= 0.75 && (probability(answers.claims_done) ?? 0) >= 0.7) flags.push('Possible unresolved failure behind a completion claim: re-read the failing output; an unrelated command that did not error is insufficient.');
+  // verification_applies is asked and was ignored: Warden's claims_verified
+  // fires on any "96 tests green" wrap-up. Without the applicability gate the
+  // flag is a completion-language detector, which is why it posted every turn.
+  const verificationApplies = (probability(answers.verification_applies) ?? 1) >= 0.7;
+  if (verificationApplies && (probability(answers.unsupported_verification) ?? 0) >= 0.75 && (probability(answers.claims_verified) ?? 0) >= 0.7) flags.push(`Possible unsupported verification claim: re-read the matching command and its output, and check scope and revision, before relying on it.${exitsRecorded ? '' : ' No exit status is recorded.'}`);
+  if (hadWorkError && (probability(answers.unresolved_failure) ?? 0) >= 0.75 && (probability(answers.claims_done) ?? 0) >= 0.7) flags.push('Possible unresolved failure behind a completion claim: re-read the failing output; an unrelated command that did not error is insufficient.');
   if ((probability(answers.same_strategy) ?? 0) >= 0.8 && (probability(answers.progress) ?? 1) < 0.5) flags.push('Repeated failures may use the same strategy without progress. Re-read the evidence and consider a different hypothesis.');
   // A missing answer is a fault to surface, not a silently dropped finding.
   const missing = candidates.flatMap((_c,i) => ['assessable','support','impact'].flatMap(kind => {
