@@ -6,7 +6,8 @@ import { EvidenceLedger } from './src/evidence.js';
 import { createService, type AssistService } from './src/service.js';
 import { ADVISORY, POLICY_VERSION, clean, digest, probability, skillRequest, selectedSkills, reviewRequest, reviewAdvice, IncompleteAnswersError, type Request } from './src/decisions.js';
 import { collectCalls, pinnedIds, buildState, questionsFor, batchCalls, decide, render, reductionRatio, type Decision } from './src/compaction.js';
-import { workingDiff, claimsFrom, claimQuestions, claimAdvice, buildClaimState, enumerateCallers, parseCallers, callerQuestions, MAX_CALLERS } from './src/autonomous.js';
+import { workingDiff, claimsFrom, claimQuestions, claimAdvice, buildClaimState, enumerateCallers, parseCallers, callerQuestions, changedSymbols, MAX_CALLERS } from './src/autonomous.js';
+import { CodeGraph, type GraphCaller } from './src/codegraph.js';
 
 const CONFIG = join(homedir(), '.pi', 'agent', 'jev-assist', 'config.json');
 function readEnabled(): boolean {
@@ -20,10 +21,12 @@ function saveEnabled(enabled: boolean): void {
   writeFileSync(temp, JSON.stringify({enabled})+'\n', {mode:0o600});
   renameSync(temp,CONFIG);
 }
-interface Dependencies { service?: AssistService; readEnabled?:()=>boolean; saveEnabled?:(enabled:boolean)=>void }
+interface Dependencies { service?: AssistService; graph?: CodeGraph; readEnabled?:()=>boolean; saveEnabled?:(enabled:boolean)=>void }
 export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {}): void {
   const service = dependencies.service ?? createService();
+  const graph = dependencies.graph ?? new CodeGraph();
   const ledger = new EvidenceLedger();
+  let watched = false;
   let enabled = false;
   let alive = false;
   let generation = 0;
@@ -42,7 +45,7 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
     if(ctx.hasUI) ctx.ui.setWidget('jev-assist',undefined);
     status(ctx, enabled ? 'Jev · automatic advice' : 'Jev · off');
   });
-  pi.on('session_shutdown', () => { alive=false; invalidate(); });
+  pi.on('session_shutdown', () => { alive=false; invalidate(); graph.dispose(); });
   // Prune finished tool output instead of summarising it, so what survives is
   // VERBATIM. Returning nothing hands compaction back to Pi's own summariser,
   // and that is the right answer more often than not: a span of mostly prose
@@ -202,7 +205,37 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
         }
       }
 
-      const enumerated = parseCallers(enumerateCallers(cwd)).slice(0, MAX_CALLERS);
+      // The code graph first: it walks real Calls edges, so it reaches callers
+      // that never mention the symbol, and it REFUSES on an unindexed workspace
+      // rather than returning an empty list. Grep only covers the window where
+      // the graph cannot answer — a brand-new symbol, or no index yet.
+      let graphCallers: GraphCaller[] = [];
+      let graphNote = '';
+      try {
+        if (!watched) { watched = await graph.watch(cwd); }
+        for (const name of changedSymbols(diff).slice(0, 6)) {
+          const id = await graph.findSymbol(name, cwd);
+          if (!id) continue;
+          const radius = await graph.blastRadius(id, cwd);
+          graphCallers.push(...radius.callers);
+          if (radius.hiddenCoupling?.length) {
+            lines.push(`Historically co-changes with this file but is not in the call graph: ${radius.hiddenCoupling.slice(0,5).join(', ')}`);
+          }
+        }
+      } catch (error) {
+        // Never silent: an unavailable graph must not read as "no callers".
+        graphNote = String((error as Error).message ?? error).slice(0, 120);
+      }
+      if (graphCallers.length) {
+        record('callers', {state:{},questions:{}} as Request, {status:'graph',callers:graphCallers.length});
+        lines.push(`Call graph — ${graphCallers.length} caller(s) of what changed (depth-ordered, mechanical):`,
+          ...graphCallers.slice(0,8).map(c => `  ${c.path} — ${c.symbol} (depth ${c.depth})`));
+      }
+
+      const enumerated = graphCallers.length ? [] : parseCallers(enumerateCallers(cwd)).slice(0, MAX_CALLERS);
+      if (graphNote && !graphCallers.length) {
+        lines.push(`Code graph unavailable (${graphNote}) — falling back to a text search, which cannot see callers that do not name the symbol.`);
+      }
       if (active(g) && enumerated.length) {
         const request = {
           state: {

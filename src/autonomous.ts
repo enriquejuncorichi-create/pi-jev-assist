@@ -69,6 +69,21 @@ export function claimsFrom(finalText: string): string[] {
   return parts.slice(0, MAX_CLAIMS);
 }
 
+/**
+ * Symbols whose DEFINITION the diff touched — the ones whose callers matter.
+ * A symbol merely mentioned on a changed line is not one whose contract moved.
+ */
+export function changedSymbols(diff: string): string[] {
+  const names = new Set<string>();
+  for (const line of diff.split('\n')) {
+    if (!line.startsWith('+') || line.startsWith('+++')) continue;
+    const match = /^\+\s*(?:export\s+)?(?:async\s+)?(?:function|const|class|interface|type)\s+([A-Za-z_][A-Za-z0-9_]*)/.exec(line)
+      ?? /^\+\s*(?:public|private|protected)?\s*(?:async\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(/.exec(line);
+    if (match?.[1] && match[1].length > 2) names.add(match[1]);
+  }
+  return [...names];
+}
+
 export function claimQuestions(claims: readonly string[]): Record<string, unknown> {
   const questions: Record<string, unknown> = {};
   claims.forEach((_c, i) => {
