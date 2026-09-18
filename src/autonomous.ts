@@ -129,12 +129,17 @@ export function claimAdvice(answers: Record<string, unknown>, claims: readonly s
 }
 
 /**
- * Callers of what changed, via the repository's own enumerator when it ships
- * one. Deliberately not reimplemented here: the mechanical list must stay the
- * repo's, so it works for people without a key, and this only consumes it.
+ * Callers of what changed, by text search, as the FALLBACK for whatever the
+ * code graph cannot answer — a brand-new symbol, or a workspace with no index.
+ *
+ * The script ships with this harness rather than with the repository under
+ * test. An earlier cut looked for `scripts/blast-radius.sh` inside the target
+ * repo, which meant the fallback only existed in a repo that had agreed to
+ * carry it — i.e. exactly never, for a personal tool that is not pushed
+ * anywhere. It runs against `cwd`; it does not need to live there.
  */
 export function enumerateCallers(cwd: string): string {
-  const script = join(cwd, 'scripts/blast-radius.sh');
+  const script = join(import.meta.dirname, '../tools/blast-radius.sh');
   if (!existsSync(script)) return '';
   try {
     const run = spawnSync('bash', [script], { cwd, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, timeout: 120_000 });
