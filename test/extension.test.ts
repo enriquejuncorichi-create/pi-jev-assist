@@ -41,6 +41,56 @@ test('a conversation-only new run clears the prior warning widget',async()=>{
  await h.emit('message_end',{message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'Hello.'}]}});await h.emit('agent_settled');
  assert.equal(h.widgets.at(-1),undefined);
 });
+const compactSpan=(n=8)=>({preparation:{firstKeptEntryId:'e9',tokensBefore:1234,isSplitTurn:false,
+ messagesToSummarize:[{role:'user',content:[{type:'text',text:'Fix the failing test. Never edit src/generated.'}]},
+  ...Array.from({length:n},(_,i)=>[
+   {role:'assistant',content:[{type:'toolCall',id:`t${i}`,name:'read',arguments:{path:`src/f${i}.ts`}}]},
+   {role:'toolResult',toolCallId:`t${i}`,toolName:'read',isError:false,content:[{type:'text',text:'x'.repeat(4000)}]},
+  ]).flat()]}});
+test('compaction prunes verbatim and never sends raw tool output',async()=>{
+ const requests:any[]=[];
+ const h=harness(async req=>{requests.push(req);
+  const answers:Record<string,unknown>={};
+  for(const key of Object.keys((req as any).questions)) answers[key]={noul:0.05};
+  return ok(answers);});
+ await h.emit('session_start');
+ const out=await h.emit('session_before_compact',compactSpan()) as {compaction:{summary:string;firstKeptEntryId:string}};
+ assert.equal(out.compaction.firstKeptEntryId,'e9');
+ // Verbatim: the user's constraint survives exactly.
+ assert.match(out.compaction.summary,/Never edit src\/generated\./);
+ // Dropped output is gone, and its absence is stated rather than silent. The
+ // NEWEST results stay verbatim however they were scored: pinned means pinned.
+ assert.match(out.compaction.summary,/output dropped as finished/);
+ assert.ok(!out.compaction.summary.includes('src/f0.ts"}) \n[tool result]'),'an early result is not kept');
+ const pinnedResults=(out.compaction.summary.match(/\[tool result\]/g)??[]).length;
+ assert.ok(pinnedResults<=3,`only pinned results stay verbatim, saw ${pinnedResults}`);
+ assert.ok(out.compaction.summary.length < 8*4000,'the span really shrank');
+ // The request never carried the 4000-char tool outputs.
+ assert.ok(!JSON.stringify(requests[0]).includes('x'.repeat(100)));
+});
+test('compaction falls back to Pi whenever it cannot do better',async()=>{
+ // Each of these must return undefined so Pi writes its own summary.
+ const unavailable=harness(async()=>({ok:false,reason:'timeout'}));
+ await unavailable.emit('session_start');
+ assert.equal(await unavailable.emit('session_before_compact',compactSpan()),undefined);
+
+ const keepAll=harness(async req=>{const answers:Record<string,unknown>={};
+  for(const key of Object.keys((req as any).questions)) answers[key]={noul:0.99};
+  return ok(answers);});
+ await keepAll.emit('session_start');
+ // Everything kept means nothing saved, so a summary is the better tool.
+ assert.equal(await keepAll.emit('session_before_compact',compactSpan()),undefined);
+
+ const split=harness(async()=>ok({}));
+ await split.emit('session_start');
+ const ev=compactSpan(); (ev.preparation as any).isSplitTurn=true;
+ assert.equal(await split.emit('session_before_compact',ev),undefined);
+
+ const noTools=harness(async()=>ok({}));
+ await noTools.emit('session_start');
+ assert.equal(await noTools.emit('session_before_compact',{preparation:{firstKeptEntryId:'e1',tokensBefore:1,isSplitTurn:false,
+  messagesToSummarize:[{role:'user',content:[{type:'text',text:'just talking'}]}]}}),undefined);
+});
 test('off switch prevents calls, not just visible advice',async()=>{
  let calls=0; const h=harness(async()=>{calls++;return ok({});}); await h.emit('session_start'); await h.command('off');
  await h.emit('before_agent_start',before); await evidence(h); await h.emit('agent_settled'); assert.equal(calls,0);

@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import { EvidenceLedger } from './src/evidence.js';
 import { createService, type AssistService } from './src/service.js';
 import { ADVISORY, POLICY_VERSION, clean, digest, skillRequest, selectedSkills, reviewRequest, reviewAdvice, IncompleteAnswersError, type Request } from './src/decisions.js';
+import { collectCalls, pinnedIds, buildState, questionsFor, batchCalls, decide, render, reductionRatio, type Decision } from './src/compaction.js';
 
 const CONFIG = join(homedir(), '.pi', 'agent', 'jev-assist', 'config.json');
 function readEnabled(): boolean {
@@ -41,6 +42,73 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
     status(ctx, enabled ? 'Jev · automatic advice' : 'Jev · off');
   });
   pi.on('session_shutdown', () => { alive=false; invalidate(); });
+  // Prune finished tool output instead of summarising it, so what survives is
+  // VERBATIM. Returning nothing hands compaction back to Pi's own summariser,
+  // and that is the right answer more often than not: a span of mostly prose
+  // has no tool output to prune. Every failure path below falls back rather
+  // than degrading the session.
+  pi.on('session_before_compact', async (event, ctx) => {
+    if (!alive || !enabled) return;
+    const preparation = (event as {preparation?: {messagesToSummarize?: unknown[]; firstKeptEntryId?: string; tokensBefore?: number; isSplitTurn?: boolean}}).preparation;
+    const messages = preparation?.messagesToSummarize;
+    if (!Array.isArray(messages) || !messages.length) return;
+    // A split turn's prefix is not a clean boundary; leave those to Pi.
+    if (preparation?.isSplitTurn) {
+      pi.appendEntry('jev-assist-decision', {policy:POLICY_VERSION,stage:'compaction',status:'skipped',reason:'split turn'});
+      return;
+    }
+    const {transcript, calls} = collectCalls(messages);
+    const pinned = pinnedIds(transcript, calls, 6);
+    const judged = calls.filter(c => !pinned.has(c.id));
+    if (!judged.length) {
+      pi.appendEntry('jev-assist-decision', {policy:POLICY_VERSION,stage:'compaction',status:'skipped',reason:'no prunable tool output'});
+      return;
+    }
+    // Batched: two questions per call against Jev's 32-question ceiling.
+    const state = buildState(transcript, task);
+    const signal = (event as {signal?: AbortSignal}).signal ?? controller.signal;
+    status(ctx, 'Jev · pruning context');
+    const decisions = new Map<string, Decision>();
+    let firstRequest: Request | undefined;
+    let model = ''; let elapsed = 0; let unavailable = '';
+    for (const batch of batchCalls(judged)) {
+      const request = {state, questions: questionsFor(batch)};
+      firstRequest ??= request;
+      const result = await service.evaluate(request, signal);
+      if (!result.ok) {
+        // A failed batch keeps its calls; it never deletes them by default.
+        unavailable = result.reason;
+        batch.forEach(call => decisions.set(call.id, 'keep'));
+        continue;
+      }
+      model = result.model; elapsed += result.elapsedMs;
+      batch.forEach((call, i) => decisions.set(call.id, decide(result.answers, i, 0.5)));
+    }
+    status(ctx, 'Jev · automatic advice');
+    if (!firstRequest) return;
+    if (unavailable && ![...decisions.values()].some(d => d !== 'keep')) {
+      record('compaction', firstRequest, {status:'unavailable',reason:unavailable});
+      return; // Pi summarises instead.
+    }
+    const request = firstRequest;
+    const result = {model, elapsedMs: elapsed} as {model:string; elapsedMs:number};
+    const summary = render(transcript, decisions, 300);
+    const charsBefore = messages.reduce<number>((n, m) => n + JSON.stringify(m).length, 0);
+    const outcome = {summary, charsBefore, charsAfter: summary.length,
+      kept:[...decisions.values()].filter(d=>d==='keep').length,
+      truncated:[...decisions.values()].filter(d=>d==='truncate').length,
+      dropped:[...decisions.values()].filter(d=>d==='drop').length,
+      pinned:pinned.size};
+    const ratio = reductionRatio(outcome);
+    record('compaction', request, {status:'judged',model:result.model,elapsedMs:result.elapsedMs,partialFailure:unavailable||undefined,
+      kept:outcome.kept,truncated:outcome.truncated,dropped:outcome.dropped,pinned:outcome.pinned,
+      charsBefore,charsAfter:outcome.charsAfter,ratio:Number(ratio.toFixed(3))});
+    // Too small a saving means a summary is genuinely the better tool here.
+    if (ratio < 0.25 || !summary.trim() || typeof preparation?.firstKeptEntryId !== 'string') return;
+    if (ctx.hasUI) ctx.ui.notify(`Jev pruned context verbatim: ${outcome.dropped} dropped, ${outcome.truncated} truncated, ${(ratio*100).toFixed(0)}% smaller. No summary written.`, 'info');
+    return {compaction: {summary, firstKeptEntryId: preparation.firstKeptEntryId,
+      tokensBefore: typeof preparation.tokensBefore === 'number' ? preparation.tokensBefore : 0}};
+  });
   pi.on('session_tree', (_event,ctx) => { invalidate(); if(ctx.hasUI) ctx.ui.setWidget('jev-assist',undefined); });
   pi.on('before_agent_start', async (event,ctx) => {
     invalidate();
