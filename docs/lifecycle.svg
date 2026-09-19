@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 220" role="img" aria-label="Session lifecycle">
+  <rect width="920" height="220" rx="16" fill="#0d1117"/>
+  <text x="28" y="36" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="12" letter-spacing="1.4">ONE SESSION</text>
+  <g font-family="ui-sans-serif,system-ui,sans-serif">
+    <rect x="24" y="56" width="200" height="128" rx="12" fill="#161b22" stroke="#30363d"/>
+    <text x="40" y="86" fill="#7ee787" font-size="13" font-weight="700">start</text>
+    <text x="40" y="110" fill="#e6edf3" font-size="14">Warm graph</text>
+    <text x="40" y="132" fill="#8b949e" font-size="12">Score live skills</text>
+    <text x="40" y="154" fill="#6e7681" font-size="11">0–1 Jev</text>
+
+    <path d="M232 120 h20" stroke="#30363d" stroke-width="2"/>
+
+    <rect x="260" y="56" width="200" height="128" rx="12" fill="#161b22" stroke="#30363d"/>
+    <text x="276" y="86" fill="#58a6ff" font-size="13" font-weight="700">each tool</text>
+    <text x="276" y="110" fill="#e6edf3" font-size="14">Blast · ledger</text>
+    <text x="276" y="132" fill="#8b949e" font-size="12">Clip huge dumps</text>
+    <text x="276" y="154" fill="#6e7681" font-size="11">live prune</text>
+
+    <path d="M468 120 h20" stroke="#30363d" stroke-width="2"/>
+
+    <rect x="496" y="56" width="200" height="128" rx="12" fill="#161b22" stroke="#30363d"/>
+    <text x="512" y="86" fill="#d2a8ff" font-size="13" font-weight="700">settled</text>
+    <text x="512" y="110" fill="#e6edf3" font-size="14">Review vs ledger</text>
+    <text x="512" y="132" fill="#8b949e" font-size="12">Claims vs the diff</text>
+    <text x="512" y="154" fill="#6e7681" font-size="11">≤3 Jev</text>
+
+    <path d="M704 120 h20" stroke="#30363d" stroke-width="2"/>
+
+    <rect x="732" y="56" width="164" height="128" rx="12" fill="#161b22" stroke="#30363d"/>
+    <text x="748" y="86" fill="#ffa657" font-size="13" font-weight="700">compact</text>
+    <text x="748" y="110" fill="#e6edf3" font-size="14">Verbatim</text>
+    <text x="748" y="132" fill="#8b949e" font-size="12">81.7% smaller</text>
+    <text x="748" y="154" fill="#6e7681" font-size="11">no summary</text>
+  </g>
+</svg>

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 200" role="img" aria-label="Huge dump clip">
+  <rect width="920" height="200" rx="16" fill="#0d1117"/>
+  <text x="28" y="32" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="12" letter-spacing="1.4">TOOL RESULT &gt; 20k CHARS</text>
+  <g font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="12">
+    <rect x="24" y="48" width="420" height="128" rx="10" fill="#161b22" stroke="#f85149"/>
+    <text x="40" y="74" fill="#f85149">before · 48 102 chars in every later prefill</text>
+    <rect x="40" y="90" width="388" height="10" rx="2" fill="#21262d"/>
+    <rect x="40" y="106" width="388" height="10" rx="2" fill="#21262d"/>
+    <rect x="40" y="122" width="388" height="10" rx="2" fill="#21262d"/>
+    <rect x="40" y="138" width="220" height="10" rx="2" fill="#21262d"/>
+    <text x="40" y="162" fill="#8b949e">… AssertionError buried at the tail</text>
+
+    <text x="458" y="112" fill="#7ee787" font-size="22">→</text>
+
+    <rect x="496" y="48" width="400" height="128" rx="10" fill="#161b22" stroke="#3fb950"/>
+    <text x="512" y="74" fill="#3fb950">after · 6k head + 2k tail</text>
+    <rect x="512" y="90" width="200" height="10" rx="2" fill="#238636"/>
+    <text x="512" y="122" fill="#8b949e">… 40 102 characters omitted …</text>
+    <rect x="512" y="138" width="120" height="10" rx="2" fill="#238636"/>
+    <text x="512" y="162" fill="#e6edf3">AssertionError still visible</text>
+  </g>
+</svg>

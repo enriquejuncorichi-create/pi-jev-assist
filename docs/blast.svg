@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 240" role="img" aria-label="Pre-write blast radius">
+  <rect width="920" height="240" rx="16" fill="#0d1117"/>
+  <text x="28" y="32" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="12" letter-spacing="1.4">BEFORE THE EDIT · SPEED BUMP ONCE PER FILE</text>
+  <g font-family="ui-sans-serif,system-ui,sans-serif">
+    <rect x="40" y="100" width="160" height="48" rx="8" fill="#1f6feb"/>
+    <text x="120" y="130" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">reviewAdvice</text>
+    <path d="M200 124 H260" stroke="#58a6ff" stroke-width="2"/>
+    <rect x="260" y="56" width="200" height="44" rx="8" fill="#161b22" stroke="#30363d"/>
+    <text x="360" y="84" text-anchor="middle" fill="#e6edf3" font-size="13">index.ts · depth 1</text>
+    <rect x="260" y="112" width="200" height="44" rx="8" fill="#161b22" stroke="#30363d"/>
+    <text x="360" y="140" text-anchor="middle" fill="#e6edf3" font-size="13">extension.test · depth 1</text>
+    <rect x="260" y="168" width="200" height="44" rx="8" fill="#161b22" stroke="#30363d"/>
+    <text x="360" y="196" text-anchor="middle" fill="#8b949e" font-size="13">ripgrep never sees hop 3</text>
+    <path d="M200 124 C230 124, 230 78, 260 78" fill="none" stroke="#58a6ff" stroke-width="2"/>
+    <path d="M200 124 C230 124, 230 190, 260 190" fill="none" stroke="#58a6ff" stroke-width="2"/>
+    <rect x="520" y="56" width="376" height="156" rx="10" fill="#161b22" stroke="#30363d"/>
+    <text x="540" y="86" fill="#ffa657" font-family="ui-monospace,monospace" font-size="12">blocked · first write</text>
+    <text x="540" y="114" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="12">Before editing src/decisions.ts —</text>
+    <text x="540" y="134" fill="#8b949e" font-family="ui-monospace,monospace" font-size="12">3 caller(s) depend on what it exports:</text>
+    <text x="540" y="160" fill="#7ee787" font-family="ui-monospace,monospace" font-size="12">  index.ts — installAssist (depth 1)</text>
+    <text x="540" y="180" fill="#8b949e" font-family="ui-monospace,monospace" font-size="12">Repeat the edit — fires once per file.</text>
+  </g>
+</svg>
