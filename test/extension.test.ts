@@ -246,6 +246,30 @@ test('a new prompt invalidates previous review and aborted messages are not revi
  resolve(ok({claims_verified:{noul:1},unsupported_verification:{noul:1}}));await pending;assert.equal(h.messages.length,0);
  await evidence(h);await h.emit('message_end',{message:{role:'assistant',stopReason:'aborted',content:[]}});await h.emit('agent_settled');assert.equal(call,3);
 });
+test('a repeated bash or read this turn is blocked rather than re-executed',async()=>{
+ const h=harness(async()=>ok({}));
+ await h.emit('session_start');
+ await h.emit('before_agent_start',before);
+ const first=await h.emit('tool_call',{toolName:'bash',input:{command:'rg reviewAdvice'}});
+ assert.equal(first,undefined);
+ const second=await h.emit('tool_call',{toolName:'bash',input:{command:'rg reviewAdvice'}}) as {block:boolean;reason:string};
+ assert.equal(second.block,true);
+ assert.match(second.reason,/Already ran/);
+ const other=await h.emit('tool_call',{toolName:'bash',input:{command:'rg other'}});
+ assert.equal(other,undefined);
+});
+test('mode and constraint join the hidden skills message when Jev is sure',async()=>{
+ const h=harness(async()=>ok({
+  s0:{noul:0.2},
+  mode:{choice:'investigate',confidence:0.91},
+  hard_constraint:{noul:0.9},
+ }));
+ await h.emit('session_start');
+ const out=await h.emit('before_agent_start',{prompt:'Who calls reviewAdvice? Never edit src/generated.ts',systemPromptOptions:{skills:[{name:'testing',description:'test software',filePath:'/skills/testing/SKILL.md',disableModelInvocation:false}]}}) as {message:{content:string}};
+ assert.match(out.message.content,/Task mode investigate/);
+ assert.match(out.message.content,/Never edit src\/generated/);
+ assert.equal(out.message.content.includes('/skills/testing'),false);
+});
 test('huge tool results are clipped before they enter the transcript',async()=>{
  const h=harness(async()=>ok({}));
  await h.emit('session_start');

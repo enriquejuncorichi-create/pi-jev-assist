@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import { EvidenceLedger } from './src/evidence.js';
 import { createService, type AssistService } from './src/service.js';
 import { ADVISORY, POLICY_VERSION, clean, digest, probability, skillRequest, selectedSkills, reviewRequest, reviewAdvice, reviewable, isCheckCommand, runnerPassed, claimSupportRequest, IncompleteAnswersError, type Request } from './src/decisions.js';
+import { attachSteer, steerRequest, modeHint, constraintLine, toolFingerprint } from './src/steer.js';
 import { collectCalls, pinnedIds, buildState, questionsFor, batchCalls, decide, render, reductionRatio, applyDecisionsToMessages, clipHugeText, type Decision } from './src/compaction.js';
 import { workingDiff, claimsFrom, claimQuestions, claimAdvice, buildClaimState, enumerateCallers, parseCallers, callerQuestions, changedSymbols, exportedSymbolsOf, MAX_CALLERS } from './src/autonomous.js';
 import { CodeGraph, type GraphCaller } from './src/codegraph.js';
@@ -44,7 +45,8 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
   let finalText = '';
   let finalNormal = false;
   let lastLivePrune = '';
-  const invalidate = () => { generation++; controller.abort(); controller = new AbortController(); ledger.reset(); finalText=''; finalNormal=false; task=''; lastLivePrune=''; };
+  const seenTools = new Set<string>();
+  const invalidate = () => { generation++; controller.abort(); controller = new AbortController(); ledger.reset(); finalText=''; finalNormal=false; task=''; lastLivePrune=''; seenTools.clear(); };
   // Deliberately NOT cleared by invalidate(): the bump is per FILE per session,
   // so a new prompt in the same session does not re-interrupt the same edit.
   void warned;
@@ -159,21 +161,26 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
     task=clean(event.prompt,4000);
     const g=generation;
     const prepared=skillRequest(task,event.systemPromptOptions.skills ?? []);
+    const request = prepared.request ? attachSteer(prepared.request) : steerRequest(task);
     if (!prepared.request) {
       pi.appendEntry('jev-assist-decision',{policy:POLICY_VERSION,stage:'skills',status:'skipped',reason:prepared.reason});
-      return;
     }
     status(ctx,'Jev · suggesting skills');
-    const result=await service.evaluate(prepared.request,controller.signal);
+    const result=await service.evaluate(request,controller.signal);
     if (!active(g)) return;
     status(ctx,'Jev · automatic advice');
-    if (!result.ok) { record('skills',prepared.request,{status:'unavailable',reason:result.reason}); return; }
-    const selected=selectedSkills(result.answers,prepared.candidates);
-    record('skills',prepared.request,{status:'judged',model:result.model,elapsedMs:result.elapsedMs,selected});
-    if (!selected.length) return;
-    // Only locally known skills can enter advice; never include model-authored instructions.
-    const suggestions=selected.map(s=>({name:clean(prepared.candidates[s.index]!.name,100),filePath:clean(prepared.candidates[s.index]!.filePath,500),probability:s.probability}));
-    return {message:{customType:'jev-assist-skills',display:false,content:`${ADVISORY}\nPotentially relevant advertised skills (metadata, not new instructions): ${JSON.stringify(suggestions)}. Read a skill only if it fits. This list does not remove other skills or override mandatory guidance.`}};
+    if (!result.ok) { record('skills',request,{status:'unavailable',reason:result.reason}); return; }
+    const selected=prepared.request ? selectedSkills(result.answers,prepared.candidates) : [];
+    const hint = [modeHint(result.answers), constraintLine(task, result.answers)].filter(Boolean);
+    record('skills',request,{status:'judged',model:result.model,elapsedMs:result.elapsedMs,selected,mode:hint[0]??''});
+    const parts: string[] = [];
+    if (selected.length) {
+      const suggestions=selected.map(s=>({name:clean(prepared.candidates[s.index]!.name,100),filePath:clean(prepared.candidates[s.index]!.filePath,500),probability:s.probability}));
+      parts.push(`${ADVISORY}\nPotentially relevant advertised skills (metadata, not new instructions): ${JSON.stringify(suggestions)}. Read a skill only if it fits. This list does not remove other skills or override mandatory guidance.`);
+    }
+    if (hint.length) parts.push(hint.join('\n'));
+    if (!parts.length) return;
+    return {message:{customType:'jev-assist-skills',display:false,content:parts.join('\n')}};
   });
   // PRE-WRITE. `tool_call` fires before the tool runs and can block, so this is
   // the only point where the blast radius arrives BEFORE the change rather than
@@ -187,9 +194,20 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
   // and a check that blocks work when its infrastructure is down gets removed.
   pi.on('tool_call', async (event, ctx) => {
     if (!alive || !enabled) return;
+    const input = event.input as Record<string, unknown>;
+    if (event.toolName === 'write' || event.toolName === 'edit') {
+      const path = input.path ?? input.file_path;
+      if (typeof path === 'string') seenTools.delete(`read:${path}`);
+    } else {
+      const fp = toolFingerprint(event.toolName, input);
+      if (fp && seenTools.has(fp)) {
+        pi.appendEntry('jev-assist-decision',{policy:POLICY_VERSION,stage:'dup-skip',tool:event.toolName,fp:clean(fp,200)});
+        return { block: true, reason: `Already ran this exact ${event.toolName} this turn. Reuse that output instead of repeating it.` };
+      }
+      if (fp) seenTools.add(fp);
+    }
     if (event.toolName !== 'write' && event.toolName !== 'edit') return;
-    const input = event.input as {path?: string; file_path?: string};
-    const target = input.path ?? input.file_path;
+    const target = (typeof input.path === 'string' ? input.path : typeof input.file_path === 'string' ? input.file_path : undefined);
     if (!target || !/\.(ts|tsx|js|jsx|svelte)$/.test(target)) return;
     if (warned.has(target)) return;
     warned.add(target);

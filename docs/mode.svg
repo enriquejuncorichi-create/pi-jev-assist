@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 230" role="img" aria-label="Task mode: Jev picks a key, code owns the sentence">
+  <rect width="920" height="230" rx="16" fill="#0d1117"/>
+  <text x="28" y="32" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="12" letter-spacing="1.4">ONE JEV CALL · FIVE KEYS · HINTS ARE FIXED IN SOURCE</text>
+  <g font-family="ui-sans-serif,system-ui,sans-serif" font-size="13">
+    <rect x="24" y="52" width="150" height="56" rx="8" fill="#161b22" stroke="#7ee787"/>
+    <text x="99" y="86" text-anchor="middle" fill="#7ee787" font-weight="700">investigate</text>
+    <rect x="186" y="52" width="150" height="56" rx="8" fill="#161b22" stroke="#30363d"/>
+    <text x="261" y="86" text-anchor="middle" fill="#e6edf3">implement</text>
+    <rect x="348" y="52" width="150" height="56" rx="8" fill="#161b22" stroke="#30363d"/>
+    <text x="423" y="86" text-anchor="middle" fill="#e6edf3">review</text>
+    <rect x="510" y="52" width="150" height="56" rx="8" fill="#161b22" stroke="#30363d"/>
+    <text x="585" y="86" text-anchor="middle" fill="#e6edf3">git</text>
+    <rect x="672" y="52" width="224" height="56" rx="8" fill="#161b22" stroke="#30363d"/>
+    <text x="784" y="86" text-anchor="middle" fill="#8b949e">chat · inject nothing</text>
+    <rect x="24" y="128" width="872" height="76" rx="10" fill="#161b22" stroke="#3fb950"/>
+    <text x="44" y="158" fill="#3fb950" font-family="ui-monospace,monospace" font-size="12">injected (confidence ≥ 0.70)</text>
+    <text x="44" y="184" fill="#e6edf3" font-size="14">Task mode investigate: search and read before concluding. Do not edit unless asked.</text>
+  </g>
+</svg>

@@ -116,6 +116,33 @@ Falls back to Pi’s summariser if saving &lt;25%, Jev fails, split turn, or the
 
 ---
 
+## Duplicate tools, skipped
+
+Agents re-run the same `rg` or `read` constantly. That is pure prefill cost. The **second identical** `bash` / `read` / `grep` this turn is blocked.
+
+![First call runs, second identical call is blocked, edit clears the read fingerprint](docs/dup.svg)
+
+```
+Already ran this exact bash this turn. Reuse that output instead of repeating it.
+```
+
+A write/edit of that path forgets the read fingerprint, so a re-read after a change still works. New prompt → fingerprints clear.
+
+## Task mode (Jev picks a key; code owns the sentence)
+
+Same Jev call as skills. Jev chooses `investigate | implement | review | git | chat`. The sentence injected is **fixed in source** — Jev never authors instructions. Confidence below 0.70 → inject nothing.
+
+![Jev selects investigate; the hint text is hardcoded](docs/mode.svg)
+
+A hard constraint (noul ≥ 0.85) is echoed **verbatim**:
+
+```
+Task mode implement: after edits, consider callers and run the tests that cover the change.
+User constraint, verbatim: Never edit src/generated.ts
+```
+
+Tried: letting Jev *plan* the next tool. Quality **0/3**. Mode is classification of the prompt, which is the thing Jev can do.
+
 ## Skill suggestions
 
 Scores the catalogue Pi is **actually advertising this run**, not `~/.pi/skills`. At most two above **0.90**. Name and path only — never model-authored instructions. Over 128 skills: abstain, do not secretly shortlist.
