@@ -118,6 +118,17 @@ test("budget covers pending calls; overflow remains mutating and excerpts bounde
   assert.equal(snap.observations[119]!.sequence, 125);
 });
 
+test("verbose check output still keeps an EXIT marker at the tail", () => {
+  const ledger = new EvidenceLedger();
+  ledger.recordCall("t", "bash", { command: "node --test; echo HOOKS_EXIT:$?" });
+  const body = `${"ok line\n".repeat(400)}HOOKS_EXIT:0\n`;
+  ledger.recordResult("t", "bash", [{ type: "text", text: body }], false, undefined);
+  const out = ledger.snapshot().observations[0]!.output;
+  assert.ok(out.length <= 1300);
+  assert.match(out, /HOOKS_EXIT:0/);
+  assert.match(out, /chars omitted/);
+});
+
 test("snapshot is detached and reset clears state", () => {
   const ledger = new EvidenceLedger();
   run(ledger, "a", "bun run test");

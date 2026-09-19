@@ -27,6 +27,15 @@ type Entry = {
 const READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const SENSITIVE = /(?:^|[\s/\\"'])\.?env(?:[.\s/\\"']|$)|auth|credential|private[-_ ]?key|(?:^|[/\\])\.ssh(?:[/\\]|$)|id_(?:rsa|ed25519|ecdsa)|\.(?:pem|key|p12|pfx)(?:$|[\s"'])/i;
 const excerpt = (text: string, limit: number): string => redact(text).slice(0, limit);
+/** Head+tail so `HOOKS_EXIT:0` after a verbose node:test listing is not clipped away. Observed: the review then claimed "no exit status" and woke the agent in a loop. */
+function excerptEnds(text: string, limit: number): string {
+  const safe = redact(text);
+  if (safe.length <= limit) return safe;
+  const head = Math.max(200, Math.floor(limit * 0.5));
+  const tail = Math.max(200, limit - head - 40);
+  const omitted = safe.length - head - tail;
+  return `${safe.slice(0, head)}\n… [${omitted} chars omitted] …\n${safe.slice(-tail)}`;
+}
 const entryKey = (id: string): string => createHash("sha256").update(id).digest("hex");
 
 /**
@@ -107,7 +116,7 @@ export class EvidenceLedger {
         // Unknown format, including truncated rows/notices, is not safe evidence.
         return source === undefined || SENSITIVE.test(source);
       });
-      entry.observation.output = sensitiveSource ? '[sensitive search results omitted]' : excerpt(text, 1200);
+      entry.observation.output = sensitiveSource ? '[sensitive search results omitted]' : excerptEnds(text, 1200);
     }
   }
 
