@@ -270,6 +270,31 @@ test('mode and constraint join the hidden skills message when Jev is sure',async
  assert.match(out.message.content,/Never edit src\/generated/);
  assert.equal(out.message.content.includes('/skills/testing'),false);
 });
+test('rg dumps become an indexed table and low-relevance files are dropped',async()=>{
+ const h=harness(async req=>{
+  const questions=(req as {questions:Record<string,unknown>}).questions;
+  if ('read' in questions) return ok({read:{choice:'f0',confidence:0.93},read2:{choice:'f1',confidence:0.8}});
+  return ok({});
+ });
+ await h.emit('session_start');
+ await h.emit('before_agent_start',{prompt:'Who calls reviewAdvice?',systemPromptOptions:{skills:[]}});
+ const dump=['src/decisions.ts:1:export function reviewAdvice() {}','index.ts:2:reviewAdvice(x)','test/decisions.test.ts:3:reviewAdvice','README.md:4:reviewAdvice'].join('\n');
+ const out=await h.emit('tool_result',{toolName:'bash',toolCallId:'g1',input:{command:'rg -n reviewAdvice'},content:[{type:'text',text:dump}]}) as {content:Array<{text:string}>};
+ assert.match(out.content[0]!.text,/function reviewAdvice/);
+ assert.match(out.content[0]!.text,/dropped 2 file/);
+ assert.ok(!out.content[0]!.text.includes('README.md:4'));
+});
+test('a bash failure gets one canned line, not a generated essay',async()=>{
+ const h=harness(async req=>{
+  if ('kind' in (req as {questions:object}).questions) return ok({kind:{choice:'permission',confidence:0.91}});
+  return ok({});
+ });
+ await h.emit('session_start');
+ await h.emit('before_agent_start',before);
+ const out=await h.emit('tool_result',{toolName:'bash',toolCallId:'e1',isError:true,input:{command:'rm x'},content:[{type:'text',text:'EACCES'}]}) as {content:Array<{text:string}>};
+ assert.match(out.content[0]!.text,/Permission failure/);
+ assert.match(out.content[0]!.text,/EACCES/);
+});
 test('huge tool results are clipped before they enter the transcript',async()=>{
  const h=harness(async()=>ok({}));
  await h.emit('session_start');

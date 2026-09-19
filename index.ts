@@ -1,30 +1,33 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { homedir } from 'node:os';
 import { EvidenceLedger } from './src/evidence.js';
 import { createService, type AssistService } from './src/service.js';
 import { ADVISORY, POLICY_VERSION, clean, digest, probability, skillRequest, selectedSkills, reviewRequest, reviewAdvice, reviewable, isCheckCommand, runnerPassed, claimSupportRequest, IncompleteAnswersError, type Request } from './src/decisions.js';
 import { attachSteer, steerRequest, modeHint, constraintLine, toolFingerprint } from './src/steer.js';
+import { parseHits, hitRequest, selectHits, renderHits, looksLikeSearch, existingHits } from './src/hits.js';
+import { looksFailed, failureRequest, failureAdvice } from './src/failure.js';
+import { shortlistInactive, toolRouterRequest, toolsToActivate } from './src/tools-router.js';
+import { loadConfig, saveConfig, loadPruneCache, savePruneCache, formatStatus, FEATURES, DEFAULTS, type AssistConfig, type Feature } from './src/settings.js';
+import { withCache } from './src/cache.js';
+import { reconstruct } from './src/preedit.js';
+import { injectionRequest, injectionWarning } from './src/injection.js';
 import { collectCalls, pinnedIds, buildState, questionsFor, batchCalls, decide, render, reductionRatio, applyDecisionsToMessages, clipHugeText, type Decision } from './src/compaction.js';
-import { workingDiff, claimsFrom, claimQuestions, claimAdvice, buildClaimState, enumerateCallers, parseCallers, callerQuestions, changedSymbols, exportedSymbolsOf, MAX_CALLERS } from './src/autonomous.js';
+import { workingDiff, snapshotHead, claimsFrom, claimQuestions, claimAdvice, buildClaimState, enumerateCallers, parseCallers, callerQuestions, changedSymbols, exportedSymbolsOf, MAX_CALLERS } from './src/autonomous.js';
 import { CodeGraph, type GraphCaller } from './src/codegraph.js';
 
-const CONFIG = join(homedir(), '.pi', 'agent', 'jev-assist', 'config.json');
+function envOff(): boolean { return process.env.PI_JEV_ASSIST === 'off' || process.env.PI_JEV_ASSIST === '0'; }
 function readEnabled(): boolean {
-  if (process.env.PI_JEV_ASSIST === 'off' || process.env.PI_JEV_ASSIST === '0') return false;
-  try { return (JSON.parse(readFileSync(CONFIG, 'utf8')) as {enabled?:unknown}).enabled === true; }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true; return false; }
+  if (envOff()) return false;
+  return loadConfig().enabled !== false;
 }
 function saveEnabled(enabled: boolean): void {
-  mkdirSync(dirname(CONFIG), {recursive:true,mode:0o700});
-  const temp = `${CONFIG}.${process.pid}.tmp`;
-  writeFileSync(temp, JSON.stringify({enabled})+'\n', {mode:0o600});
-  renameSync(temp,CONFIG);
+  const cfg = loadConfig();
+  saveConfig({ ...cfg, enabled });
 }
 interface Dependencies { service?: AssistService; graph?: CodeGraph; readEnabled?:()=>boolean; saveEnabled?:(enabled:boolean)=>void }
 export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {}): void {
-  const service = dependencies.service ?? createService();
+  let cfg: AssistConfig = { ...DEFAULTS };
+  const inner = dependencies.service ?? createService();
+  const service = dependencies.service ? inner : withCache(inner, () => Math.max(0, cfg.cacheSeconds) * 1000);
   const graph = dependencies.graph ?? new CodeGraph();
   const ledger = new EvidenceLedger();
   let watched = false;
@@ -46,6 +49,8 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
   let finalNormal = false;
   let lastLivePrune = '';
   const seenTools = new Set<string>();
+  const pruneCache = new Map<string, Decision>();
+  let baselineSha = '';
   const invalidate = () => { generation++; controller.abort(); controller = new AbortController(); ledger.reset(); finalText=''; finalNormal=false; task=''; lastLivePrune=''; seenTools.clear(); };
   // Deliberately NOT cleared by invalidate(): the bump is per FILE per session,
   // so a new prompt in the same session does not re-interrupt the same edit.
@@ -55,7 +60,11 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
   const record = (stage:string, request:Request, details:Record<string,unknown>) => pi.appendEntry('jev-assist-decision', {policy:POLICY_VERSION,stage,generation,inputHash:digest(request),...details,usage:service.usage()});
 
   pi.on('session_start', (_event: {reason?: string} | undefined, ctx) => {
-    alive=true; lastFlagKey=''; invalidate(); enabled=(dependencies.readEnabled ?? readEnabled)();
+    alive=true; lastFlagKey=''; invalidate(); cfg=loadConfig(); enabled=(dependencies.readEnabled ?? readEnabled)();
+    if (cfg.persistPrune) {
+      pruneCache.clear();
+      for (const [k, v] of Object.entries(loadPruneCache())) pruneCache.set(k, v as Decision);
+    }
     if(ctx.hasUI) ctx.ui.setWidget('jev-assist',undefined);
     status(ctx, enabled ? 'Jev · automatic advice' : 'Jev · off');
     // session_start fires for EVERY entry point — startup, reload, new, resume
@@ -159,9 +168,11 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
     if (!alive || !enabled) return;
     service.beginRun();
     task=clean(event.prompt,4000);
+    const cwd=(ctx as unknown as {cwd?:string}).cwd ?? process.cwd();
+    if (cfg.claimBaseline) baselineSha = snapshotHead(cwd) || baselineSha;
     const g=generation;
-    const prepared=skillRequest(task,event.systemPromptOptions.skills ?? []);
-    const request = prepared.request ? attachSteer(prepared.request) : steerRequest(task);
+    const prepared=cfg.skills ? skillRequest(task,event.systemPromptOptions.skills ?? []) : {candidates:[] as never[], reason:'skills off'};
+    const request = prepared.request && cfg.skills ? (cfg.modeCard ? attachSteer(prepared.request) : prepared.request) : steerRequest(task);
     if (!prepared.request) {
       pi.appendEntry('jev-assist-decision',{policy:POLICY_VERSION,stage:'skills',status:'skipped',reason:prepared.reason});
     }
@@ -170,9 +181,28 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
     if (!active(g)) return;
     status(ctx,'Jev · automatic advice');
     if (!result.ok) { record('skills',request,{status:'unavailable',reason:result.reason}); return; }
-    const selected=prepared.request ? selectedSkills(result.answers,prepared.candidates) : [];
-    const hint = [modeHint(result.answers), constraintLine(task, result.answers)].filter(Boolean);
+    const selected=('request' in prepared && prepared.request) ? selectedSkills(result.answers,prepared.candidates) : [];
+    const hint = [cfg.modeCard ? modeHint(result.answers) : '', constraintLine(task, result.answers)].filter(Boolean);
+    if (cfg.taskPin && !cfg.pin) {
+      const line = constraintLine(task, result.answers);
+      if (line) cfg = { ...cfg, pin: clean((task.split('\n')[0] ?? task), 240) };
+    }
     record('skills',request,{status:'judged',model:result.model,elapsedMs:result.elapsedMs,selected,mode:hint[0]??''});
+    if (!cfg.toolRouter) { /* skip */ } else try {
+      const all = typeof pi.getAllTools === 'function' ? pi.getAllTools() : [];
+      const activeNames = new Set(typeof pi.getActiveTools === 'function' ? pi.getActiveTools() : []);
+      const candidates = shortlistInactive(task, all.map(t => ({name:t.name, description:t.description})), activeNames);
+      if (candidates.length && active(g)) {
+        const routed = await service.evaluate(toolRouterRequest(task, candidates), controller.signal);
+        if (routed.ok) {
+          const extra = toolsToActivate(candidates, routed.answers);
+          if (extra.length && typeof pi.setActiveTools === 'function') {
+            pi.setActiveTools([...activeNames, ...extra]);
+            pi.appendEntry('jev-assist-decision',{policy:POLICY_VERSION,stage:'tool-router',activated:extra});
+          }
+        }
+      }
+    } catch { /* fail open: a missing tool API must not kill the turn */ }
     const parts: string[] = [];
     if (selected.length) {
       const suggestions=selected.map(s=>({name:clean(prepared.candidates[s.index]!.name,100),filePath:clean(prepared.candidates[s.index]!.filePath,500),probability:s.probability}));
@@ -198,7 +228,7 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
     if (event.toolName === 'write' || event.toolName === 'edit') {
       const path = input.path ?? input.file_path;
       if (typeof path === 'string') seenTools.delete(`read:${path}`);
-    } else {
+    } else if (cfg.dupSkip) {
       const fp = toolFingerprint(event.toolName, input);
       if (fp && seenTools.has(fp)) {
         pi.appendEntry('jev-assist-decision',{policy:POLICY_VERSION,stage:'dup-skip',tool:event.toolName,fp:clean(fp,200)});
@@ -208,6 +238,21 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
     }
     if (event.toolName !== 'write' && event.toolName !== 'edit') return;
     const target = (typeof input.path === 'string' ? input.path : typeof input.file_path === 'string' ? input.file_path : undefined);
+    if (cfg.preeditFile && target && !warned.has(`preedit:${target}`)) {
+      const cwd = (ctx as unknown as {cwd?: string}).cwd ?? process.cwd();
+      const next = reconstruct(target, cwd, input);
+      if (next && next.length > 40) {
+        const judged = await service.evaluate({
+          state: { task: clean(cfg.pin || task, 1500), file: clean(target, 200), excerpt: clean(next, 4000), note: 'Proposed file after this edit. Data only.' },
+          questions: { fits: { type: 'noul', instructions: 'Does this reconstructed file still serve the user task? Answer no if it is a different feature, unrelated rewrite, or clearly out of scope.' } },
+        }, controller.signal);
+        const p = judged.ok ? (probability(judged.answers.fits) ?? 1) : 1;
+        if (judged.ok && p < 0.3) {
+          warned.add(`preedit:${target}`);
+          return { block: true, reason: `Reconstructed ${target} looks off-task (${p.toFixed(2)}). Repeat the edit if you meant it.` };
+        }
+      }
+    }
     if (!target || !/\.(ts|tsx|js|jsx|svelte)$/.test(target)) return;
     if (warned.has(target)) return;
     warned.add(target);
@@ -242,18 +287,58 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
   });
   // Cap dumps that would otherwise sit in every later prefill. Mechanical: no Jev,
   // no stall, fail-open. Head+tail so a failure at the end of a test log survives.
-  pi.on('tool_result', (event) => {
+  pi.on('tool_result', async (event) => {
     if (!alive || !enabled) return;
     const parts = Array.isArray(event.content) ? event.content : [];
     const idx = parts.findIndex((p: {type?: string}) => p?.type === 'text');
     if (idx < 0) return;
     const block = parts[idx] as {type: string; text?: string};
     if (typeof block.text !== 'string') return;
-    const clipped = clipHugeText(block.text);
-    if (!clipped.clipped) return;
-    pi.appendEntry('jev-assist-decision', {policy:POLICY_VERSION,stage:'clip-huge',tool:event.toolName,before:block.text.length,after:clipped.text.length});
+    let text = block.text;
+    const clipped = cfg.clipHuge ? clipHugeText(text) : { text, clipped: false as const };
+    if (clipped.clipped) {
+      text = clipped.text;
+      pi.appendEntry('jev-assist-decision', {policy:POLICY_VERSION,stage:'clip-huge',tool:event.toolName,before:block.text.length,after:text.length});
+    }
+    const input = (event.input ?? {}) as Record<string, unknown>;
+    const cwd = (event as {cwd?: string}).cwd ?? process.cwd();
+    if (cfg.hitIndex && looksLikeSearch(event.toolName, input) && !clipped.clipped) {
+      const hits = existingHits(parseHits(text), cwd);
+      if (hits.length >= 4) {
+        const request = hitRequest(task, hits);
+        const judged = await service.evaluate(request, controller.signal);
+        if (judged.ok) {
+          const picked = selectHits(hits, judged.answers);
+          if (picked.dropped.length) {
+            text = renderHits(text, picked.keep, picked.dropped);
+            pi.appendEntry('jev-assist-decision', {policy:POLICY_VERSION,stage:'hit-index',spread:Number(picked.spread.toFixed(3)),kept:picked.keep.map(h=>h.path),dropped:picked.dropped.map(h=>h.path)});
+          } else {
+            pi.appendEntry('jev-assist-decision', {policy:POLICY_VERSION,stage:'hit-index',spread:Number(picked.spread.toFixed(3)),status:'no-spread'});
+          }
+        }
+      }
+    }
+    if (cfg.injectionScreen && text.length >= 200 && text.length <= 6_000 && (event.toolName === 'read' || event.toolName === 'grep')) {
+      const judged = await service.evaluate(injectionRequest(text), controller.signal);
+      if (judged.ok) {
+        const warn = injectionWarning(judged.answers);
+        if (warn) text = `${warn}\n\n${text}`;
+      }
+    }
+    if (cfg.failureClass && looksFailed(event.toolName, event.isError, text)) {
+      const command = typeof input.command === 'string' ? input.command : event.toolName;
+      const judged = await service.evaluate(failureRequest(command, text), controller.signal);
+      if (judged.ok) {
+        const line = failureAdvice(judged.answers);
+        if (line) {
+          text = `${text}\n\n[jev-assist] ${line}`;
+          pi.appendEntry('jev-assist-decision', {policy:POLICY_VERSION,stage:'failure-class',kind:line.slice(0,40)});
+        }
+      }
+    }
+    if (text === block.text) return;
     const next = parts.slice();
-    next[idx] = { type: 'text' as const, text: clipped.text };
+    next[idx] = { type: 'text' as const, text };
     return { content: next };
   });
   pi.on('tool_execution_end', (event) => {
@@ -262,7 +347,7 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
   // Same prune as compaction, but every turn AFTER tools have piled up — so later
   // LLM calls are smaller without waiting for Pi's compaction threshold.
   (pi.on as (name: string, fn: (event: unknown, ctx: ExtensionContext) => unknown) => void)('context', async (event: unknown, ctx: ExtensionContext) => {
-    if (!alive || !enabled) return;
+    if (!alive || !enabled || !cfg.livePrune) return;
     const messages = (event as {messages?: unknown[]}).messages;
     if (!Array.isArray(messages) || messages.length < 8) return;
     const {transcript, calls} = collectCalls(messages);
@@ -276,8 +361,13 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
     const g = generation;
     const state = buildState(transcript, task);
     const decisions = new Map<string, Decision>();
+    for (const call of judged) {
+      const cached = pruneCache.get(call.id);
+      if (cached) decisions.set(call.id, cached);
+    }
+    const fresh = judged.filter(c => !pruneCache.has(c.id));
     let firstRequest: Request | undefined;
-    for (const batch of batchCalls(judged)) {
+    for (const batch of batchCalls(fresh)) {
       const request = {state, questions: questionsFor(batch)};
       firstRequest ??= request;
       const result = await service.evaluate(request, controller.signal);
@@ -285,15 +375,20 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
         batch.forEach(call => decisions.set(call.id, 'keep'));
         continue;
       }
-      batch.forEach((call, i) => decisions.set(call.id, decide(result.answers, i, 0.5)));
+      batch.forEach((call, i) => {
+        const d = decide(result.answers, i, 0.5);
+        decisions.set(call.id, d);
+        pruneCache.set(call.id, d);
+      });
     }
-    if (!firstRequest) return;
+    if (!firstRequest && ![...decisions.values()].some(d => d !== 'keep')) return;
     if (![...decisions.values()].some(d => d !== 'keep')) {
-      record('live-prune', firstRequest, {status:'noop',judged:judged.length,volume});
+      if (firstRequest) record('live-prune', firstRequest, {status:'noop',judged:judged.length,volume,fresh:fresh.length,cached:judged.length-fresh.length});
       return;
     }
     const outcome = applyDecisionsToMessages(messages, decisions, 300);
-    record('live-prune', firstRequest, {status:'applied', ...outcome, judged:judged.length});
+    if (firstRequest) record('live-prune', firstRequest, {status:'applied', ...outcome, judged:judged.length,fresh:fresh.length,cached:judged.length-fresh.length});
+    if (cfg.persistPrune) savePruneCache(pruneCache);
     if (outcome.mutated === 0) return;
     if (ctx.hasUI) ctx.ui.notify(`Jev live-pruned ${outcome.mutated} tool result(s); ${(100*(1-outcome.charsAfter/Math.max(1,outcome.charsBefore))).toFixed(0)}% smaller context.`, 'info');
     return { messages };
@@ -304,7 +399,7 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
     finalText=event.message.content.filter(p=>p.type==='text').map(p=>p.text).join('\n');
   });
   pi.on('agent_settled', async (_event,ctx) => {
-    if (!alive || !enabled || !ctx.isIdle() || !finalNormal || !finalText || reviewed===generation) return;
+    if (!alive || !enabled || !cfg.review || !ctx.isIdle() || !finalNormal || !finalText || reviewed===generation) return;
     const g=generation;
     reviewed=g;
     const evidence=ledger.snapshot();
@@ -358,7 +453,7 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
     // skipped entirely when nothing was written.
     if (evidence.mutations > 0) {
       const cwd = (ctx as unknown as {cwd?: string}).cwd ?? process.cwd();
-      const diff = workingDiff(cwd);
+      const diff = workingDiff(cwd, cfg.claimBaseline ? baselineSha : undefined);
       const claims = claimsFrom(finalText, diff);
       if (diff && claims.length) {
         const request = {state: buildClaimState(claims, diff), questions: claimQuestions(claims)};
@@ -483,19 +578,42 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
     },
   } as never);
   pi.registerCommand('jev-assist',{
-    description:'Automatic Jev advice: status, on, off. Never grants permissions or certifies completion.',
+    description:'Jev assist: status, on, off, settings, pin, unpin, set <feature> on|off. Advisory only.',
     handler:async(args,ctx)=>{
-      const action=args.trim() || 'status';
+      const parts=args.trim().split(/\s+/).filter(Boolean);
+      const action=parts[0] || 'status';
       if(action==='off' || action==='on') {
         const next=action==='on';
-        if(next && ['off','0'].includes(process.env.PI_JEV_ASSIST ?? '')) { if(ctx.hasUI) ctx.ui.notify('PI_JEV_ASSIST disables this extension; change the environment and restart.','warning'); return; }
-        try { (dependencies.saveEnabled ?? saveEnabled)(next); }
+        if(next && envOff()) { if(ctx.hasUI) ctx.ui.notify('PI_JEV_ASSIST disables this extension; change the environment and restart.','warning'); return; }
+        try { (dependencies.saveEnabled ?? saveEnabled)(next); cfg={...cfg,enabled:next}; }
         catch { if(ctx.hasUI) ctx.ui.notify('Could not save Jev setting; no state changed.','error'); return; }
         invalidate(); enabled=next;
         if(ctx.hasUI) ctx.ui.setWidget('jev-assist',undefined);
       }
+      if(action==='pin') {
+        cfg={...cfg,pin:clean(parts.slice(1).join(' ') || task, 240)};
+        try { saveConfig(cfg); } catch { /* */ }
+      }
+      if(action==='unpin') { cfg={...cfg,pin:''}; try { saveConfig(cfg); } catch { /* */ } }
+      if(action==='set' && parts[1] && (parts[2]==='on'||parts[2]==='off') && (FEATURES as readonly string[]).includes(parts[1])) {
+        cfg={...cfg, [parts[1]]: parts[2]==='on'} as AssistConfig;
+        try { saveConfig(cfg); } catch { /* */ }
+      }
+      if(action==='cache' && parts[1] && /^\d+$/.test(parts[1])) {
+        cfg={...cfg, cacheSeconds: Math.min(3600, Number(parts[1]))};
+        try { saveConfig(cfg); } catch { /* */ }
+      }
+      if(action==='settings' && ctx.hasUI && typeof ctx.ui.select==='function') {
+        const labels=FEATURES.map(f=>`${cfg[f]?'●':'○'} ${f}`);
+        const picked=await ctx.ui.select('Toggle a jev-assist feature (● on)', ['Done', ...labels]);
+        const name=picked?.replace(/^[●○]\s+/, '') as Feature | undefined;
+        if(name && (FEATURES as readonly string[]).includes(name)) {
+          cfg={...cfg, [name]: !cfg[name]} as AssistConfig;
+          try { saveConfig(cfg); } catch { /* */ }
+        }
+      }
       status(ctx,enabled ? 'Jev · automatic advice' : 'Jev · off');
-      if(ctx.hasUI) ctx.ui.notify(`Jev ${enabled?'on':'off'}; model jev-1.13.0; ${JSON.stringify(service.usage())}. Automatic skill + evidence + trace advice. No approvals, tool activation or automatic follow-ups.`,'info');
+      if(ctx.hasUI) ctx.ui.notify(formatStatus({...cfg,enabled}, service.usage()),'info');
     },
   });
 }

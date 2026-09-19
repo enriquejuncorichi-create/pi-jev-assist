@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 220" role="img" aria-label="jev-assist settings">
+  <rect width="920" height="220" rx="16" fill="#0d1117"/>
+  <text x="28" y="32" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="12" letter-spacing="1.4">/JEV-ASSIST SETTINGS</text>
+  <g font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="13" fill="#e6edf3">
+    <text x="40" y="70" fill="#3fb950">● livePrune   ● clipHuge   ● hitIndex   ● failureClass</text>
+    <text x="40" y="98" fill="#3fb950">● dupSkip     ● toolRouter  ● skills     ● modeCard</text>
+    <text x="40" y="126" fill="#3fb950">● injection   ● taskPin     ● persistPrune ● claimBaseline</text>
+    <text x="40" y="154" fill="#3fb950">● preeditFile ● review</text>
+    <text x="40" y="188" fill="#8b949e">/jev-assist set livePrune off   ·   /jev-assist pin never edit src/generated</text>
+  </g>
+</svg>

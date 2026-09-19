@@ -32,10 +32,14 @@ function git(cwd: string, args: string[]): string {
   } catch { return ''; }
 }
 
-/** What this run actually changed, staged and unstaged, against HEAD. */
-export function workingDiff(cwd: string): string {
+/** What this run actually changed, staged and unstaged, against a snapshot SHA or HEAD. */
+export function workingDiff(cwd: string, from?: string): string {
   if (!git(cwd, ['rev-parse', '--git-dir']).trim()) return '';
-  return git(cwd, ['diff', 'HEAD', '--no-color']);
+  const spec = from && /^[0-9a-f]{7,40}$/i.test(from) ? from : 'HEAD';
+  return git(cwd, ['diff', spec, '--no-color']);
+}
+export function snapshotHead(cwd: string): string {
+  return git(cwd, ['rev-parse', 'HEAD']).trim();
 }
 
 /**

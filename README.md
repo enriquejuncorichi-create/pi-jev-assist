@@ -114,7 +114,38 @@ Fix the failing test. Never edit src/generated.
 
 Falls back to Pi’s summariser if saving &lt;25%, Jev fails, split turn, or there is no tool output to prune.
 
+Live prune **remembers** each tool-call id and writes `prune-cache.json` so `/resume` does not re-pay Jev. Identical Jev payloads are cached 120s and in-flight calls coalesce.
+
+Read/grep output is screened for **instructions aimed at an AI**. A reconstructed whole file is judged before a write/edit (not just the hunk). Claims use the **HEAD snapshot at the user prompt**, so mid-task commits stay in the diff.
+
+## Bash failure class
+
+On a failed `bash` result, Jev picks `transient | environment | code_bug | permission | user_error | no_failure`. The sentence appended is **fixed in source**:
+
+```
+EACCES
+
+[jev-assist] Permission failure: do not retry the same command; change the invocation or ask.
+```
+
 ---
+
+## Indexed search hits (browser-use / jev-ultrafast, for code)
+
+`rg` output becomes a numbered table: path + the matching line, like their DOM `[3] combobox Where to?`. One Jev **choice** picks the first file to READ, a second choice may pick a caller. Independent noul-per-file coin-flipped (~0.50) and was discarded. Low confidence keeps the whole dump.
+
+Live `rg reviewAdvice`: first choice **src/decisions.ts** at confidence **0.99**. Second head 0.38 → not used. Implementation kept; passing mentions dropped. Paths that do not exist on disk are dropped **before** Jev (no fake candidates from test separators).
+
+```
+[jev-assist] dropped 15 file(s) as low-relevance (README.md, docs/dup.svg, …).
+Re-run the search if you need them.
+```
+
+## Inactive tools, turned on (not “Jev plans bash”)
+
+[TheoOliveira/pi-jev](https://github.com/TheoOliveira/pi-jev) does **not** pick the next shell command. It **lexical-shortlists inactive Pi tools**, then Jev noul “does this tool help?”, then `setActiveTools` **adds** them. We copied that. We still do **not** let Jev choose `rg` vs `read` vs `test` — that A/B was 0/3.
+
+Fail-closed permission auto-mode (jomatsu, MoonTory) is a different product. We stay advisory.
 
 ## Duplicate tools, skipped
 
@@ -185,7 +216,8 @@ Claim checking: structural claims discriminate (5/6 on PR #989). “Revokes alre
 | Clip dumps &gt;20k | 0–29% of tool chars · ~0 ms | **shipped** |
 | Live prune | 14% of a 40-msg slice | **shipped** |
 | Code-owned plan; Jev only “enough?” | Quality **3/3** · 7.2k vs 39.5k Pi · 1.6s vs 42s | pattern |
-| Jev picks the next tool | **0/3** quality · faster and wrong | no |
+| Jev picks the next *bash step* | **0/3** quality · faster and wrong | no |
+| Activate unused Pi tools (shortlist + noul) | TheoOliveira `jev_find_tools` — **not** a planner; we now do this | **shipped** |
 | Rerank `rg` lines | Dropped `function reviewAdvice` | no |
 | Rank files from paths | Every file ~0.58 · kept nothing | no |
 | Strip skills below 0.90 | Dropped jev-review | no |
@@ -206,9 +238,17 @@ ln -s ~/Projects/pi-jev-assist ~/.pi/agent/extensions/jev-assist
 
 | | |
 | --- | --- |
-| `/jev-assist status` | Model, usage, on/off |
-| `/jev-assist off` | `~/.pi/agent/jev-assist/config.json` |
+| `/jev-assist` | Status: every feature ●/○, cache TTL, pin |
+| `/jev-assist settings` | Toggle a feature in the UI |
+| `/jev-assist set livePrune off` | Persist one flag |
+| `/jev-assist pin …` / `unpin` | Judge later work against this sentence |
+| `/jev-assist cache 120` | Identical Jev payload cache (seconds) |
+| `/jev-assist on` / `off` | Master switch |
 | `PI_JEV_ASSIST=off` | Env kill switch wins |
+
+![Settings: every feature can be toggled](docs/settings.svg)
+
+Config: `~/.pi/agent/jev-assist/config.json`. Prune verdicts persist in `prune-cache.json` across `/resume`.
 
 Vortex optional. Bounds (tested): **2.5 s**, **48 kB**/request, **6**/run **300**/session, breaker after 3 failures, redact then clip.
 
