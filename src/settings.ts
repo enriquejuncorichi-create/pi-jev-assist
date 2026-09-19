@@ -12,6 +12,32 @@ export const FEATURES = [
 ] as const;
 export type Feature = typeof FEATURES[number];
 
+export const FEATURE_LABEL: Record<Feature, string> = {
+  livePrune: 'Live prune — shrink old tool dumps each turn',
+  clipHuge: 'Clip huge dumps — keep head+tail over 20k chars',
+  hitIndex: 'Search hit index — keep 1–2 files from rg',
+  failureClass: 'Bash failure class — canned retry advice',
+  dupSkip: 'Skip duplicate bash/read/grep this turn',
+  toolRouter: 'Activate unused Pi tools (shortlist + Jev)',
+  skills: 'Suggest skills from the live catalogue',
+  modeCard: 'Task mode card (investigate/implement/…)',
+  injectionScreen: 'Warn on tool output that orders an AI around',
+  taskPin: 'Pin the user task and auto-fill from constraints',
+  persistPrune: 'Remember prune verdicts across /resume',
+  claimBaseline: 'Diff claims from HEAD at the user prompt',
+  preeditFile: 'Judge the reconstructed file before write/edit',
+  review: 'Settled review vs ledger and diff',
+};
+
+export function featureOption(cfg: AssistConfig, f: Feature): string {
+  return `${cfg[f] ? 'ON ' : 'off'}  ${FEATURE_LABEL[f]}`;
+}
+
+export function featureFromOption(option: string): Feature | undefined {
+  const label = option.replace(/^(ON |off)\s+/, '');
+  return FEATURES.find(f => FEATURE_LABEL[f] === label);
+}
+
 export interface AssistConfig {
   enabled: boolean;
   cacheSeconds: number;

@@ -6,7 +6,7 @@ import { attachSteer, steerRequest, modeHint, constraintLine, toolFingerprint } 
 import { parseHits, hitRequest, selectHits, renderHits, looksLikeSearch, existingHits } from './src/hits.js';
 import { looksFailed, failureRequest, failureAdvice } from './src/failure.js';
 import { shortlistInactive, toolRouterRequest, toolsToActivate } from './src/tools-router.js';
-import { loadConfig, saveConfig, loadPruneCache, savePruneCache, formatStatus, FEATURES, DEFAULTS, type AssistConfig, type Feature } from './src/settings.js';
+import { loadConfig, saveConfig, loadPruneCache, savePruneCache, formatStatus, FEATURES, featureOption, featureFromOption, DEFAULTS, type AssistConfig, type Feature } from './src/settings.js';
 import { withCache } from './src/cache.js';
 import { reconstruct } from './src/preedit.js';
 import { injectionRequest, injectionWarning } from './src/injection.js';
@@ -578,10 +578,11 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
     },
   } as never);
   pi.registerCommand('jev-assist',{
-    description:'Jev assist: status, on, off, settings, pin, unpin, set <feature> on|off. Advisory only.',
+    description:'Jev assist settings menu. Also: on, off, pin, unpin, set <feature> on|off.',
     handler:async(args,ctx)=>{
+      const persistCfg=()=>{ try { saveConfig(cfg); } catch { if(ctx.hasUI) ctx.ui.notify('Could not save settings.','error'); } };
       const parts=args.trim().split(/\s+/).filter(Boolean);
-      const action=parts[0] || 'status';
+      const action=parts[0] || (ctx.hasUI && typeof ctx.ui.select==='function' ? 'menu' : 'status');
       if(action==='off' || action==='on') {
         const next=action==='on';
         if(next && envOff()) { if(ctx.hasUI) ctx.ui.notify('PI_JEV_ASSIST disables this extension; change the environment and restart.','warning'); return; }
@@ -590,26 +591,57 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
         invalidate(); enabled=next;
         if(ctx.hasUI) ctx.ui.setWidget('jev-assist',undefined);
       }
-      if(action==='pin') {
-        cfg={...cfg,pin:clean(parts.slice(1).join(' ') || task, 240)};
-        try { saveConfig(cfg); } catch { /* */ }
-      }
-      if(action==='unpin') { cfg={...cfg,pin:''}; try { saveConfig(cfg); } catch { /* */ } }
+      if(action==='pin') { cfg={...cfg,pin:clean(parts.slice(1).join(' ') || task, 240)}; persistCfg(); }
+      if(action==='unpin') { cfg={...cfg,pin:''}; persistCfg(); }
       if(action==='set' && parts[1] && (parts[2]==='on'||parts[2]==='off') && (FEATURES as readonly string[]).includes(parts[1])) {
-        cfg={...cfg, [parts[1]]: parts[2]==='on'} as AssistConfig;
-        try { saveConfig(cfg); } catch { /* */ }
+        cfg={...cfg, [parts[1]]: parts[2]==='on'} as AssistConfig; persistCfg();
       }
       if(action==='cache' && parts[1] && /^\d+$/.test(parts[1])) {
-        cfg={...cfg, cacheSeconds: Math.min(3600, Number(parts[1]))};
-        try { saveConfig(cfg); } catch { /* */ }
+        cfg={...cfg, cacheSeconds: Math.min(3600, Number(parts[1]))}; persistCfg();
       }
-      if(action==='settings' && ctx.hasUI && typeof ctx.ui.select==='function') {
-        const labels=FEATURES.map(f=>`${cfg[f]?'●':'○'} ${f}`);
-        const picked=await ctx.ui.select('Toggle a jev-assist feature (● on)', ['Done', ...labels]);
-        const name=picked?.replace(/^[●○]\s+/, '') as Feature | undefined;
-        if(name && (FEATURES as readonly string[]).includes(name)) {
-          cfg={...cfg, [name]: !cfg[name]} as AssistConfig;
-          try { saveConfig(cfg); } catch { /* */ }
+      const ui = ctx.hasUI ? ctx.ui : undefined;
+      if ((action==='menu' || action==='settings') && ui && typeof ui.select==='function') {
+        let stay=true;
+        while (stay) {
+          const home=await ui.select('jev-assist', [
+            cfg.enabled ? 'Master switch  ·  ON' : 'Master switch  ·  off',
+            'Toggle features…',
+            cfg.pin ? `Pin  ·  ${cfg.pin.slice(0,48)}` : 'Set pin…',
+            'Clear pin',
+            `Jev cache  ·  ${cfg.cacheSeconds}s`,
+            'Done',
+          ]);
+          if (!home || home==='Done') break;
+          if (home.startsWith('Master')) {
+            const next=!cfg.enabled;
+            if(next && envOff()) { ui.notify('PI_JEV_ASSIST disables this extension; change the environment and restart.','warning'); continue; }
+            try { (dependencies.saveEnabled ?? saveEnabled)(next); cfg={...cfg,enabled:next}; invalidate(); enabled=next; }
+            catch { ui.notify('Could not save.','error'); }
+            continue;
+          }
+          if (home==='Toggle features…') {
+            while (true) {
+              const rows=FEATURES.map(f=>featureOption(cfg,f));
+              const picked=await ui.select('Each line is a switch. Choose one to flip.', ['Back', ...rows]);
+              if (!picked || picked==='Back') break;
+              const name=featureFromOption(picked);
+              if (!name) break;
+              cfg={...cfg, [name]: !cfg[name]} as AssistConfig;
+              persistCfg();
+            }
+            continue;
+          }
+          if (home.startsWith('Pin') || home==='Set pin…') {
+            const typed=typeof ui.input==='function' ? await ui.input('Pin', cfg.pin || 'Never edit …') : undefined;
+            if (typeof typed==='string') { cfg={...cfg,pin:clean(typed,240)}; persistCfg(); }
+            continue;
+          }
+          if (home==='Clear pin') { cfg={...cfg,pin:''}; persistCfg(); continue; }
+          if (home.startsWith('Jev cache')) {
+            const typed=typeof ui.input==='function' ? await ui.input('Cache seconds (0–3600)', String(cfg.cacheSeconds)) : undefined;
+            const n=Number(typed);
+            if (Number.isFinite(n) && n>=0 && n<=3600) { cfg={...cfg,cacheSeconds:Math.floor(n)}; persistCfg(); }
+          }
         }
       }
       status(ctx,enabled ? 'Jev · automatic advice' : 'Jev · off');

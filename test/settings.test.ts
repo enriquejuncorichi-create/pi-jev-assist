@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULTS, loadConfig, saveConfig, formatStatus, FEATURES } from '../src/settings.js';
+import { DEFAULTS, loadConfig, saveConfig, formatStatus, FEATURES, featureOption, featureFromOption } from '../src/settings.js';
 import { withCache } from '../src/cache.js';
 import { reconstruct } from '../src/preedit.js';
 import { injectionWarning } from '../src/injection.js';
@@ -19,6 +19,9 @@ test('config round-trip keeps feature flags', () => {
   assert.equal(loaded.hitIndex, true);
   assert.match(formatStatus(loaded, { requests: 1 }), /○ livePrune/);
   assert.ok(FEATURES.includes('review'));
+  const line = featureOption(loaded, 'livePrune');
+  assert.match(line, /off/);
+  assert.equal(featureFromOption(line), 'livePrune');
 });
 
 test('cache returns the first success and coalesces inflight', async () => {

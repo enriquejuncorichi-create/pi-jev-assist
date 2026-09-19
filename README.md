@@ -238,8 +238,8 @@ ln -s ~/Projects/pi-jev-assist ~/.pi/agent/extensions/jev-assist
 
 | | |
 | --- | --- |
-| `/jev-assist` | Status: every feature ●/○, cache TTL, pin |
-| `/jev-assist settings` | Toggle a feature in the UI |
+| `/jev-assist` | **Menu:** master switch, toggle each feature, pin, cache |
+| `/jev-assist settings` | Same menu |
 | `/jev-assist set livePrune off` | Persist one flag |
 | `/jev-assist pin …` / `unpin` | Judge later work against this sentence |
 | `/jev-assist cache 120` | Identical Jev payload cache (seconds) |
