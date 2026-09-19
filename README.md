@@ -141,6 +141,12 @@ Live `rg reviewAdvice`: first choice **src/decisions.ts** at confidence **0.99**
 Re-run the search if you need them.
 ```
 
+## Vault write (create vs update)
+
+After Vortex `prepare_write`, Jev chooses **ADD / UPDATE / SUPERSEDE / NOOP** from similar notes. The sentence is fixed in code. A `create_note` without `preflight_id` is speed-bumped once: run prepare_write first.
+
+Session handoffs from `pi-vortex-hooks` now use **one draft title per session** and **update in place** when the existing note is still a machine-generated draft. Someone else’s note with the same title is still quarantined.
+
 ## Inactive tools, turned on (not “Jev plans bash”)
 
 [TheoOliveira/pi-jev](https://github.com/TheoOliveira/pi-jev) does **not** pick the next shell command. It **lexical-shortlists inactive Pi tools**, then Jev noul “does this tool help?”, then `setActiveTools` **adds** them. We copied that. We still do **not** let Jev choose `rg` vs `read` vs `test` — that A/B was 0/3.

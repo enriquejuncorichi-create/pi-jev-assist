@@ -5,6 +5,7 @@ import { ADVISORY, POLICY_VERSION, clean, digest, probability, skillRequest, sel
 import { attachSteer, steerRequest, modeHint, constraintLine, toolFingerprint } from './src/steer.js';
 import { parseHits, hitRequest, selectHits, renderHits, looksLikeSearch, existingHits } from './src/hits.js';
 import { looksFailed, failureRequest, failureAdvice } from './src/failure.js';
+import { isVortexWriteTool, parsePrepareWrite, vaultWriteRequest, vaultWriteAdvice } from './src/vault-write.js';
 import { shortlistInactive, toolRouterRequest, toolsToActivate } from './src/tools-router.js';
 import { loadConfig, saveConfig, loadPruneCache, savePruneCache, formatStatus, FEATURES, featureOption, featureFromOption, DEFAULTS, type AssistConfig, type Feature } from './src/settings.js';
 import { withCache } from './src/cache.js';
@@ -236,6 +237,13 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
       }
       if (fp) seenTools.add(fp);
     }
+    if (cfg.vaultWrite && isVortexWriteTool(event.toolName)) {
+      const action = typeof input.action === 'string' ? input.action : '';
+      if ((action === 'create_note' || action === 'update_note') && !input.preflight_id && !warned.has('vault-preflight')) {
+        warned.add('vault-preflight');
+        return { block: true, reason: 'Run vortex prepare_write first. Jev will classify ADD / UPDATE / SUPERSEDE / NOOP from similar notes; then retry with preflight_id.' };
+      }
+    }
     if (event.toolName !== 'write' && event.toolName !== 'edit') return;
     const target = (typeof input.path === 'string' ? input.path : typeof input.file_path === 'string' ? input.file_path : undefined);
     if (cfg.preeditFile && target && !warned.has(`preedit:${target}`)) {
@@ -323,6 +331,19 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
       if (judged.ok) {
         const warn = injectionWarning(judged.answers);
         if (warn) text = `${warn}\n\n${text}`;
+      }
+    }
+    if (cfg.vaultWrite && isVortexWriteTool(event.toolName)) {
+      const parsed = parsePrepareWrite(text);
+      if (parsed) {
+        const judged = await service.evaluate(vaultWriteRequest(task, parsed.similar, parsed.titleDuplicates), controller.signal);
+        if (judged.ok) {
+          const line = vaultWriteAdvice(judged.answers, parsed.similar);
+          if (line) {
+            text = `${text}\n\n[jev-assist] ${line}`;
+            pi.appendEntry('jev-assist-decision', {policy:POLICY_VERSION,stage:'vault-write',decision:line.slice(0,80)});
+          }
+        }
       }
     }
     if (cfg.failureClass && looksFailed(event.toolName, event.isError, text)) {

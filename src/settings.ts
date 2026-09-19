@@ -8,7 +8,7 @@ export const PRUNE_PATH = join(homedir(), '.pi', 'agent', 'jev-assist', 'prune-c
 export const FEATURES = [
   'livePrune', 'clipHuge', 'hitIndex', 'failureClass', 'dupSkip', 'toolRouter',
   'skills', 'modeCard', 'injectionScreen', 'taskPin', 'persistPrune',
-  'claimBaseline', 'preeditFile', 'review',
+  'claimBaseline', 'preeditFile', 'review', 'vaultWrite',
 ] as const;
 export type Feature = typeof FEATURES[number];
 
@@ -27,6 +27,7 @@ export const FEATURE_LABEL: Record<Feature, string> = {
   claimBaseline: 'Diff claims from HEAD at the user prompt',
   preeditFile: 'Judge the reconstructed file before write/edit',
   review: 'Settled review vs ledger and diff',
+  vaultWrite: 'Vault write — ADD / UPDATE / SUPERSEDE / NOOP from prepare_write',
 };
 
 export function featureOption(cfg: AssistConfig, f: Feature): string {
@@ -56,6 +57,7 @@ export interface AssistConfig {
   claimBaseline: boolean;
   preeditFile: boolean;
   review: boolean;
+  vaultWrite: boolean;
 }
 
 export const DEFAULTS: AssistConfig = {
@@ -76,6 +78,7 @@ export const DEFAULTS: AssistConfig = {
   claimBaseline: true,
   preeditFile: true,
   review: true,
+  vaultWrite: true,
 };
 
 function atomicWrite(path: string, body: string): void {

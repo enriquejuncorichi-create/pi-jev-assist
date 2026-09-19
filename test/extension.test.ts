@@ -295,6 +295,28 @@ test('a bash failure gets one canned line, not a generated essay',async()=>{
  assert.match(out.content[0]!.text,/Permission failure/);
  assert.match(out.content[0]!.text,/EACCES/);
 });
+test('vortex create_note without prepare_write is bumped once',async()=>{
+ const h=harness(async()=>ok({}));
+ await h.emit('session_start');
+ await h.emit('before_agent_start',before);
+ const first=await h.emit('tool_call',{toolName:'vortex_vortex_vault',input:{action:'create_note',title:'x'}}) as {block?:boolean;reason?:string};
+ assert.equal(first?.block,true);
+ assert.match(first!.reason!,/prepare_write/);
+ const second=await h.emit('tool_call',{toolName:'vortex_vortex_vault',input:{action:'create_note',title:'x'}});
+ assert.equal(second,undefined);
+});
+test('prepare_write results get a vault ADD/UPDATE line',async()=>{
+ const h=harness(async req=>{
+  if ('decision' in (req as {questions:object}).questions) return ok({decision:{choice:'UPDATE',confidence:0.92}});
+  return ok({});
+ });
+ await h.emit('session_start');
+ await h.emit('before_agent_start',before);
+ const body=JSON.stringify({preflight_id:'pw1',similar:[{noteId:'abc',title:'Lessons',score:0.8}],title_duplicates:[]});
+ const out=await h.emit('tool_result',{toolName:'vortex_vortex_vault',toolCallId:'v1',input:{action:'prepare_write'},content:[{type:'text',text:body}]}) as {content:Array<{text:string}>};
+ assert.match(out.content[0]!.text,/Vault write: UPDATE/);
+ assert.match(out.content[0]!.text,/abc/);
+});
 test('huge tool results are clipped before they enter the transcript',async()=>{
  const h=harness(async()=>ok({}));
  await h.emit('session_start');
