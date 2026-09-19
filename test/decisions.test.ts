@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { skillRequest, selectedSkills, reviewRequest, reviewAdvice, reviewable, clean, probability, certainty, IncompleteAnswersError, GAPS } from '../src/decisions.js';
+import { skillRequest, selectedSkills, reviewRequest, reviewAdvice, reviewable, isCheckCommand, isGitPorcelain, runnerPassed, claimSupportRequest, clean, probability, certainty, IncompleteAnswersError, GAPS } from '../src/decisions.js';
 import { doneQuestions, stuckQuestions } from 'pi-warden';
 const skill={name:'testing',description:'Run and interpret tests',filePath:'/skills/testing/SKILL.md'};
 test('skills use advertised catalogue only, preserving real filePath',()=>{
@@ -27,6 +27,41 @@ test('a wrap-up with no check, mutation or work-tool error is not reviewable',()
  assert.equal(reviewable('Done.',{observations:[obs('bash','false','error')],mutations:0}),true);
  assert.equal(reviewable('Pushed.',{observations:[],mutations:1}),true);
  assert.equal(reviewable('Done.',{observations:[obs('bg_run','timeout','error')],mutations:0}),false);
+ // Observed: prettier/git on `*.test.ts` was treated as a check because `\btest\b` matches the path.
+ assert.equal(reviewable('Formatted.',{observations:[obs('bash','bun prettier --write scripts/guard-worktree-install.test.ts')],mutations:0}),false);
+ assert.equal(isCheckCommand('bun prettier --write scripts/guard-worktree-install.test.ts'),false);
+ assert.equal(isCheckCommand('bun test scripts/guard-worktree-install.test.ts'),true);
+ // Observed: `prettier --check` was named as the command to re-run because `\bcheck\b` matches `--check`.
+ assert.equal(isCheckCommand('/home/enrique/Projects/ccd-platform/node_modules/.bin/prettier --check'),false);
+ assert.equal(isCheckCommand('npm run check'),true);
+ // Observed: `git diff … test/decisions.test.ts` was named as a check because `test/` is a path.
+ assert.equal(isCheckCommand('git diff --stat src/decisions.ts test/decisions.test.ts'),false);
+});
+
+test('a green node:test summary or TSC:0 is a recorded pass',()=>{
+ assert.equal(runnerPassed('TSC:0\n'),true);
+ assert.equal(runnerPassed('TEST_EXIT:0\n108 pass'),true);
+ assert.equal(runnerPassed('ℹ tests 108\nℹ pass 108\nℹ fail 0\n'),true);
+ assert.equal(runnerPassed('TEST_EXIT:1\n'),false);
+ const obs={id:'1',tool:'bash',call:'bun run test',output:'ℹ pass 108\nℹ fail 0',status:'ok' as const,mutation:false,sequence:1};
+ assert.equal(reviewRequest('t','108 tests pass',{observations:[obs],mutations:0,unknownMutations:0,dropped:0}).runnerOk,true);
+ const answers={claims_verified:{noul:0.99},unsupported_verification:{noul:0.99},verification_applies:{noul:0.99}};
+ assert.equal(reviewAdvice(answers,[],true,false,true).flags.length,0);
+});
+
+test('claim-support refuses empty evidence',()=>{
+ assert.deepEqual(claimSupportRequest('tests passed',''),{reason:'evidence empty — refuse rather than score vibes'});
+ assert.ok('request' in claimSupportRequest('tests passed on this revision','TEST_EXIT:0\n105 pass 0 fail bun run test'));
+});
+
+test('empty git commit is not a work-tool error',()=>{
+ const git={id:'1',tool:'bash',call:'cd /tmp/ccd-996 && git commit -m fix',output:'nothing to commit, working tree clean\nCOMMIT_EXIT:1',status:'error' as const,mutation:false,sequence:1};
+ const fail={id:'2',tool:'bash',call:'bun test scripts/x.test.ts',output:'fail',status:'error' as const,mutation:false,sequence:2};
+ assert.equal(isGitPorcelain(git.call),true);
+ assert.equal(isGitPorcelain('git add a.test.ts && git commit -m x'),true);
+ assert.equal(isGitPorcelain('bun prettier --write a.test.ts && git commit -m x'),false);
+ assert.equal(reviewRequest('t','done',{observations:[git],mutations:0,unknownMutations:0,dropped:0}).hadWorkError,false);
+ assert.equal(reviewRequest('t','done',{observations:[fail],mutations:0,unknownMutations:0,dropped:0}).hadWorkError,true);
 });
 
 test('unresolved-failure flag needs a work-tool error, not just completion language',()=>{

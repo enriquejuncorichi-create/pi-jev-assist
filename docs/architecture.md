@@ -14,6 +14,12 @@
    (write|edit)     │ speed bump, once per file, fails open │
                     └──────────────────────────────────────┘
                     ┌──────────────────────────────────────┐
+  tool_result ──────►│ clip dumps >20k chars (head+tail)    │  no Jev call
+                    └──────────────────────────────────────┘
+                    ┌──────────────────────────────────────┐
+  context ──────────►│ live prune finished tool output      │  1–2 Jev calls
+                    └──────────────────────────────────────┘
+                    ┌──────────────────────────────────────┐
   tool_execution_*  │ evidence ledger (redacted, bounded)  │  no Jev call
                     └──────────────────────────────────────┘
                     ┌──────────────────────────────────────┐

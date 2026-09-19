@@ -233,3 +233,70 @@ export function reductionRatio(outcome: PruneOutcome): number {
   if (outcome.charsBefore <= 0) return 0;
   return 1 - outcome.charsAfter / outcome.charsBefore;
 }
+
+/** Huge dumps never need Jev: keep head+tail so errors at the end survive. */
+export const HUGE_RESULT_CHARS = 20_000;
+export const HUGE_HEAD = 6_000;
+export const HUGE_TAIL = 2_000;
+
+export function clipHugeText(text: string): { text: string; clipped: boolean } {
+  if (text.length <= HUGE_RESULT_CHARS) return { text, clipped: false };
+  const omitted = text.length - HUGE_HEAD - HUGE_TAIL;
+  return {
+    clipped: true,
+    text: `${text.slice(0, HUGE_HEAD)}\n\n… ${omitted} characters omitted (head+tail kept; re-run the tool if you need the middle)\n\n${text.slice(-HUGE_TAIL)}`,
+  };
+}
+
+function setToolResultText(message: RawMessage, next: string): void {
+  if (Array.isArray(message.content)) {
+    const blocks = message.content as RawBlock[];
+    const first = blocks.find(b => b?.type === 'text');
+    if (first) first.text = next;
+    else blocks.push({ type: 'text', text: next });
+    return;
+  }
+  if (typeof message.content === 'string') message.content = next;
+}
+
+/** Apply keep/truncate/drop to a live message list. User/assistant text is never rewritten. */
+export function applyDecisionsToMessages(
+  messages: unknown[],
+  decisions: ReadonlyMap<string, Decision>,
+  truncateHeadChars: number,
+): { charsBefore: number; charsAfter: number; mutated: number } {
+  let charsBefore = 0;
+  let charsAfter = 0;
+  let mutated = 0;
+  for (const raw of messages) {
+    const message = (raw ?? {}) as RawMessage;
+    if (message.role !== 'toolResult') {
+      const n = text(message.content).length;
+      charsBefore += n;
+      charsAfter += n;
+      continue;
+    }
+    const id = typeof message.toolCallId === 'string' ? message.toolCallId : '';
+    const body = text(message.content);
+    charsBefore += body.length;
+    const decision = decisions.get(id) ?? 'keep';
+    if (decision === 'keep') {
+      charsAfter += body.length;
+      continue;
+    }
+    mutated++;
+    if (decision === 'drop') {
+      const note = `[tool output dropped as finished, ${body.length} chars; re-run the tool if needed]`;
+      setToolResultText(message, note);
+      charsAfter += note.length;
+      continue;
+    }
+    const head = body.slice(0, truncateHeadChars);
+    const next = body.length > truncateHeadChars
+      ? `${head}\n… ${body.length - truncateHeadChars} further characters dropped; re-run the tool if needed`
+      : head;
+    setToolResultText(message, next);
+    charsAfter += next.length;
+  }
+  return { charsBefore, charsAfter, mutated };
+}

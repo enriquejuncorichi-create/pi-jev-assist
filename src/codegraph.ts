@@ -30,6 +30,42 @@ export interface BlastRadius {
 const INIT_TIMEOUT_MS = 20_000;
 const CALL_TIMEOUT_MS = 30_000;
 
+/** MCP tool results are JSON, JSON-in-fences, or structuredContent. Never throw 'unparseable' on a fence. */
+export function parseIntelligence(message: {
+  result?: { content?: Array<{ text?: string }>; structuredContent?: unknown; isError?: boolean };
+  error?: { message?: string };
+}): Record<string, unknown> {
+  if (message.error) throw new Error(message.error.message ?? 'intelligence error');
+  const structured = message.result?.structuredContent;
+  if (structured && typeof structured === 'object' && !Array.isArray(structured)) return structured as Record<string, unknown>;
+  const text = (message.result?.content ?? []).map(c => c.text ?? '').join('');
+  if (message.result?.isError || /^\s*Error:/.test(text)) throw new Error(text.slice(0, 200) || 'intelligence error');
+  const stripped = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
+  const tryParse = (raw: string): Record<string, unknown> | undefined => {
+    try {
+      const value = JSON.parse(raw) as unknown;
+      if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>;
+      if (Array.isArray(value)) return { hits: value };
+    } catch { /* next */ }
+    return undefined;
+  };
+  const direct = tryParse(stripped);
+  if (direct) return direct;
+  const start = stripped.indexOf('{');
+  const end = stripped.lastIndexOf('}');
+  if (start >= 0 && end > start) {
+    const nested = tryParse(stripped.slice(start, end + 1));
+    if (nested) return nested;
+  }
+  const bracket = stripped.indexOf('[');
+  const bracketEnd = stripped.lastIndexOf(']');
+  if (bracket >= 0 && bracketEnd > bracket) {
+    const nested = tryParse(stripped.slice(bracket, bracketEnd + 1));
+    if (nested) return nested;
+  }
+  throw new Error('unparseable intelligence response');
+}
+
 export class CodeGraph {
   private child?: ChildProcessWithoutNullStreams;
   private pending = new Map<number, { resolve: (m: unknown) => void; reject: (e: Error) => void }>();
@@ -114,12 +150,12 @@ export class CodeGraph {
       name: 'vortex_intelligence', arguments: { action, ...args },
     }, CALL_TIMEOUT_MS) as { result?: { content?: Array<{ text?: string }> }; error?: { message?: string } };
     if (message.error) throw new Error(message.error.message ?? 'intelligence error');
-    const text = (message.result?.content ?? []).map(c => c.text ?? '').join('');
-    // A tool_error arrives as CONTENT, not as a JSON-RPC error: `workspace_not_indexed`
-    // is delivered this way, and treating it as a result would read as "no callers".
-    if (/^\s*Error:/.test(text)) throw new Error(text.slice(0, 200));
-    try { return JSON.parse(text) as Record<string, unknown>; }
-    catch { throw new Error('unparseable intelligence response'); }
+    try {
+      return parseIntelligence(message);
+    } catch (error) {
+      this.broken = true;
+      throw error;
+    }
   }
 
   /**
@@ -172,7 +208,9 @@ export class CodeGraph {
 
   async findSymbol(name: string, path: string): Promise<string | undefined> {
     const data = await this.intelligence('search_symbols', { query: name, path, limit: 10 });
-    const hits = Array.isArray(data) ? data as Array<Record<string, unknown>> : [];
+    const hits = Array.isArray(data) ? data as Array<Record<string, unknown>>
+      : Array.isArray((data as {hits?: unknown}).hits) ? (data as {hits: Array<Record<string, unknown>>}).hits
+      : [];
     // Exact label match only: a substring hit is a different symbol, and asking
     // the graph about the wrong one produces a confident answer to no question.
     const exact = hits.find(h => h.label === name && typeof h.id === 'string');

@@ -108,6 +108,37 @@ repository:
 
 This is what the tooling is aimed at, and why the pre-write hook exists.
 
+## Token spend and speed (2026-09-19)
+
+Tried several Jev shapes on **real** day-to-day work (ccd-platform sessions, this repo's `reviewAdvice` investigation, a 6-task closed fixture). Failures kept because they are the operating rule.
+
+### What discriminated
+
+| Experiment | Quality | Tokens | Speed | Ship? |
+| --- | --- | --- | --- | --- |
+| **Mechanical clip** of tool results >20k chars (head+tail, no Jev) | Gold errors at the tail survive by construction | 0–29% of *tool-result* chars on 6 real sessions (0 on two that never dumped 20k) | ~0 ms | **Yes** — `tool_result` |
+| **Live prune** (same Jev questions as compaction, every turn after 8k prunable chars) | Last-40 of a real session: 8/8 judged `drop`/`truncate`; user text untouched | Tool text 41 125 → 23 471 (**43%**); whole slice 130 479 → 112 161 (**14%**). Naive drop-all-but-recent-6 on full sessions: **71–95%** of tool text, **~21%** of a 5.6 MB ccd-platform session | Jev ~1 call / 8k volume, not on the first turns | **Yes** — `context` hook, fail-open, last 6 messages pinned |
+| **Code-owned plan, Jev only scores “enough evidence?”** on `reviewAdvice` | **3/3** (flags, callers, tests green) | 7 201 Jev tokens vs Pi **39 471** last-total (**82% less**) | **1.6 s vs 42.2 s** (**96% faster**) | Pattern for *mechanical* investigations, not a general agent |
+| Closed-set Jev **tool dispatch** (tiny fixture) | **18/18** gold, 3 repeats | 11.7k in / 2.2k out for 18 calls | **228–326 ms** / task | Fixture only |
+
+### What failed its own gold — do not ship
+
+| Experiment | What happened |
+| --- | --- |
+| Jev as **planner** over 7 closed actions (`heavy-task-ab`) | 3.1 s, 12 steps, **quality 0/3**. Looped `rg`/`read`, never ran tests. Pi: 42 s, 7 tools, **3/3**. Faster *and wrong*. |
+| **Line rerank** of a real `rg reviewAdvice` dump | Dropped **`src/decisions.ts` function reviewAdvice`** — the implementation. 5.7% smaller, gold lost. |
+| **File rank** from paths only | Every file ~0.56–0.59 (coin-flip). Threshold 0.6 kept **nothing**, including `src/decisions.ts` and `index.ts`. |
+| **Skill-thinning** at 0.90 on five daily prompts | Dropped **all six** skills, including `jev-review` on a PR-triage prompt. Would have stripped mandatory guidance. Suggestion-only stays. |
+| Jev “enough evidence?” stop-early at 0.70 | Never fired; the scripted pipeline still ran all four steps. Scoring “enough” is conservative, which is the right failure. |
+
+### Against the 30% / 20% targets
+
+- **Long Pi sessions (the expensive days):** live prune + huge-clip is the general lever. Measured **14%** on a live Jev slice and **~21%** of a 5.6 MB session if old tool dumps are dropped. That is **not** 30% by itself. Combined with existing verbatim compaction (already **81.7%** when `/compact` fires) it is how later turns get cheaper *before* the compact threshold.
+- **Mechanical investigate/test loops:** replacing the LLM with **code-owned steps + Jev as a stop judge** beat Pi by **~80% tokens and ~20× wall-clock** with matching gold. That *is* the 30%/20% target, but only for that shape of work — Jev must not choose the next tool.
+- **Short chat / one-shot edits:** no lever here hits 30% without deleting skills or planning with Jev, both of which failed gold.
+
+Rule, same as the rest of this file: **classify supplied evidence, do not find, do not plan.**
+
 ## Bugs found by running, not by testing
 
 Three of this project's own defects passed a green suite:

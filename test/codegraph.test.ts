@@ -1,7 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CodeGraph } from '../src/codegraph.js';
+import { CodeGraph, parseIntelligence } from '../src/codegraph.js';
 import { changedSymbols } from '../src/autonomous.js';
+
+test('intelligence JSON may arrive fenced or as structuredContent', () => {
+  assert.deepEqual(parseIntelligence({ result: { structuredContent: { direct: [] } } }), { direct: [] });
+  assert.deepEqual(parseIntelligence({ result: { content: [{ text: '```json\n{"direct":[]}\n```' }] } }), { direct: [] });
+  assert.deepEqual(parseIntelligence({ result: { content: [{ text: '[{"label":"a","id":"1"}]' }] } }), { hits: [{ label: 'a', id: '1' }] });
+  assert.throws(() => parseIntelligence({ result: { content: [{ text: 'not json at all' }] } }), /unparseable/);
+});
 
 test('only symbols whose DEFINITION the diff touched are traced', () => {
   const diff = [

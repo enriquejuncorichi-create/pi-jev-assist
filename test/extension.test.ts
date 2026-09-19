@@ -8,7 +8,8 @@ function harness(evaluate:AssistService['evaluate'], hasUI=false, graph?:unknown
  const handlers=new Map<string,(event:never,ctx:ExtensionContext)=>unknown>();
  const entries:unknown[]=[]; const messages:Array<{message:unknown;options:unknown}>=[];
  let command:((args:string,ctx:ExtensionContext)=>Promise<void>)|undefined;
- const pi={on:(name:string,fn:(event:never,ctx:ExtensionContext)=>unknown)=>handlers.set(name,fn),appendEntry:(_t:string,data:unknown)=>entries.push(data),sendMessage:(message:unknown,options:unknown)=>messages.push({message,options}),registerCommand:(_n:string,def:{handler:typeof command})=>{command=def.handler;}} as unknown as ExtensionAPI;
+ const tools:unknown[]=[];
+ const pi={on:(name:string,fn:(event:never,ctx:ExtensionContext)=>unknown)=>handlers.set(name,fn),appendEntry:(_t:string,data:unknown)=>entries.push(data),sendMessage:(message:unknown,options:unknown)=>messages.push({message,options}),registerCommand:(_n:string,def:{handler:typeof command})=>{command=def.handler;},registerTool:(def:unknown)=>tools.push(def)} as unknown as ExtensionAPI;
  const widgets:unknown[]=[];
  const ctx={hasUI,isIdle:()=>true,ui:{setWidget:(_key:string,value:unknown)=>widgets.push(value),setStatus:()=>{},notify:()=>{}}} as unknown as ExtensionContext;
  const service={evaluate,usage:()=>({requests:0,inputTokens:0,outputTokens:0,failures:0}),beginRun:()=>{}} as AssistService;
@@ -159,10 +160,25 @@ test('a flagged review WAKES the agent, and cannot loop',async()=>{
  assert.deepEqual(h.messages[0].options,{triggerTurn:true},'a flagged review must wake the agent');
  assert.match(String((h.messages[0].message as {content:string}).content),/Acknowledge each point above/,'it must demand engagement, not offer a banner');
 
- // The run our wake started: it reviews, but must not wake another.
+ // The run our wake started: same flags stay silent (not a muted duplicate banner).
+ await h.emit('before_agent_start',before); await evidence(h); await h.emit('agent_settled');
+ assert.equal(h.messages.length,1,'repeating the same flags must not post again');
+});
+
+test('a wake follow-up with different flags still posts without waking',async()=>{
+ let reviews=0;
+ const h=harness(async req=>{
+  if (!('unsupported_verification' in (req as {questions:object}).questions)) return ok({s0:{noul:0.1}});
+  reviews++;
+  return reviews===1
+   ? ok({claims_verified:{noul:0.95},unsupported_verification:{noul:0.95}})
+   : ok({claims_done:{noul:0.95},unresolved_failure:{noul:0.9},verification_applies:{noul:0.1}});
+ });
+ await h.emit('session_start',{reason:'startup'});
+ await h.emit('before_agent_start',before); await evidence(h); await h.emit('agent_settled');
  await h.emit('before_agent_start',before); await evidence(h); await h.emit('agent_settled');
  assert.equal(h.messages.length,2);
- assert.deepEqual(h.messages[1].options,{triggerTurn:false},'the run we started cannot wake another');
+ assert.deepEqual(h.messages[1].options,{triggerTurn:false});
 });
 
 test('a wrap-up with git/gh and no check does not review at all',async()=>{
@@ -229,6 +245,35 @@ test('a new prompt invalidates previous review and aborted messages are not revi
  const pending=h.emit('agent_settled'); await h.emit('before_agent_start',before);
  resolve(ok({claims_verified:{noul:1},unsupported_verification:{noul:1}}));await pending;assert.equal(h.messages.length,0);
  await evidence(h);await h.emit('message_end',{message:{role:'assistant',stopReason:'aborted',content:[]}});await h.emit('agent_settled');assert.equal(call,3);
+});
+test('huge tool results are clipped before they enter the transcript',async()=>{
+ const h=harness(async()=>ok({}));
+ await h.emit('session_start');
+ const text='Z'.repeat(25_000);
+ const out=await h.emit('tool_result',{toolName:'bash',toolCallId:'h1',content:[{type:'text',text}]}) as {content:Array<{text:string}>};
+ assert.ok(out.content[0]!.text.length < text.length);
+ assert.match(out.content[0]!.text,/omitted/);
+ assert.ok(JSON.stringify(h.entries).includes('clip-huge'));
+});
+test('live context prune drops finished tool output in place',async()=>{
+ const h=harness(async req=>{
+  const answers:Record<string,unknown>={};
+  for(const key of Object.keys((req as {questions:Record<string,unknown>}).questions)) answers[key]={noul:0.05};
+  return ok(answers);
+ });
+ await h.emit('session_start');
+ await h.emit('before_agent_start',before);
+ const messages=[
+  {role:'user',content:[{type:'text',text:'Investigate reviewAdvice'}]},
+  ...Array.from({length:8},(_,i)=>[
+   {role:'assistant',content:[{type:'toolCall',id:`t${i}`,name:'read',arguments:{path:`f${i}.ts`}}]},
+   {role:'toolResult',toolCallId:`t${i}`,toolName:'read',isError:false,content:[{type:'text',text:'y'.repeat(2000)}]},
+  ]).flat(),
+ ];
+ const out=await h.emit('context',{messages}) as {messages:typeof messages};
+ assert.ok(out.messages);
+ const bodies=out.messages.filter(m=>m.role==='toolResult').map(m=>(m.content as Array<{text:string}>)[0]!.text);
+ assert.ok(bodies.some(t=>/dropped as finished/.test(t)));
 });
 test('service failure is recorded as unavailable, not a clear result',async()=>{
  const h=harness(async()=>({ok:false,reason:'timeout'}));await h.emit('session_start');await h.emit('before_agent_start',before);await evidence(h);await h.emit('agent_settled');

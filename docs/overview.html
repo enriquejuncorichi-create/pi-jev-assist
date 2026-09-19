@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pi-jev-assist — observation, not autobiography</title>
+<style>
+  :root {
+    --bg: #0b0d0c;
+    --bg2: #121614;
+    --fg: #e7eee6;
+    --muted: #8d978c;
+    --faint: #5c655c;
+    --line: #243028;
+    --card: #161b18;
+    --ok: #6fbf6a;
+    --bad: #e07068;
+    --warn: #d4b45c;
+    --accent: #9ad48a;
+    --accent2: #7eb8c9;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    color: var(--fg);
+    background:
+      radial-gradient(1200px 600px at 10% -10%, #1a2a1c 0%, transparent 50%),
+      radial-gradient(900px 500px at 110% 0%, #132028 0%, transparent 45%),
+      var(--bg);
+    font: 16px/1.55 "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  }
+  .wrap { max-width: 68rem; margin: 0 auto; padding: 0 1.4rem 5rem; }
+  header.hero { padding: 3.2rem 0 1.5rem; }
+  .kicker {
+    font: 650 .72rem/1 ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: .16em; text-transform: uppercase; color: var(--accent);
+  }
+  h1 {
+    font-size: clamp(2rem, 4vw, 3.1rem);
+    letter-spacing: -.03em;
+    line-height: 1.05;
+    margin: .45rem 0 .7rem;
+    font-weight: 700;
+  }
+  .lead { max-width: 40rem; color: var(--muted); font-size: 1.12rem; }
+  nav.toc {
+    display: flex; flex-wrap: wrap; gap: .45rem;
+    margin: 1.4rem 0 0;
+    font: 600 .78rem/1 ui-sans-serif, system-ui, sans-serif;
+  }
+  nav.toc a {
+    color: var(--fg); text-decoration: none;
+    border: 1px solid var(--line); background: var(--card);
+    padding: .38rem .65rem; border-radius: 999px;
+  }
+  nav.toc a:hover { border-color: var(--accent); color: var(--accent); }
+  h2 {
+    font-size: 1.35rem; margin: 2.8rem 0 .8rem;
+    letter-spacing: -.02em;
+  }
+  h3 { font-size: 1.02rem; margin: 1.4rem 0 .4rem; font-family: ui-sans-serif, system-ui, sans-serif; }
+  p, li { color: #d5ddd3; }
+  .muted { color: var(--muted); }
+  .pipeline {
+    display: grid; grid-template-columns: 1fr auto 1fr auto 1fr;
+    gap: .55rem; align-items: stretch; margin: 1.2rem 0 1.6rem;
+  }
+  @media (max-width: 720px) { .pipeline { grid-template-columns: 1fr; } .pipeline .arr { display: none; } }
+  .pipe {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: .9rem 1rem;
+  }
+  .pipe b { display: block; font-family: ui-sans-serif, system-ui, sans-serif; font-size: .82rem; margin-bottom: .25rem; }
+  .pipe span { color: var(--muted); font-size: .88rem; }
+  .arr { color: var(--faint); align-self: center; font-family: ui-sans-serif; }
+  .timeline { display: grid; gap: 0; border-left: 2px solid var(--line); margin: 1rem 0 0 0.4rem; }
+  .step {
+    position: relative; padding: 0 0 1.15rem 1.25rem;
+  }
+  .step::before {
+    content: ""; position: absolute; left: -6px; top: .35rem;
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--accent); box-shadow: 0 0 0 3px #0b0d0c;
+  }
+  .step.cost-none::before { background: var(--accent2); }
+  .when { font: 650 .72rem/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: .08em; text-transform: uppercase; color: var(--accent2); }
+  .step h3 { margin: .25rem 0 .2rem; }
+  .cost { font: 500 .78rem/1.3 ui-sans-serif, system-ui, sans-serif; color: var(--faint); }
+  table {
+    width: 100%; border-collapse: collapse; font: .9rem/1.4 ui-sans-serif, system-ui, sans-serif;
+  }
+  th, td { text-align: left; padding: .5rem .55rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  .grid { display: grid; gap: .75rem; }
+  @media (min-width: 700px) {
+    .grid.two { grid-template-columns: 1fr 1fr; }
+    .grid.three { grid-template-columns: 1fr 1fr 1fr; }
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 1rem 1.05rem;
+  }
+  .card strong { display: block; font-family: ui-sans-serif, system-ui, sans-serif; margin-bottom: .3rem; }
+  .tag {
+    display: inline-block; font: 700 .68rem/1 ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: .06em; text-transform: uppercase;
+    padding: .18rem .42rem; border-radius: 4px; vertical-align: middle;
+  }
+  .yes { background: #17351c; color: var(--ok); }
+  .no { background: #3a1818; color: var(--bad); }
+  .maybe { background: #3a3216; color: var(--warn); }
+  pre, .mono {
+    font-family: ui-monospace, "Cascadia Code", monospace; font-size: .8rem;
+  }
+  pre.cmd {
+    background: var(--bg2); border: 1px solid var(--line); border-radius: 10px;
+    padding: 1rem 1.1rem; overflow-x: auto; color: #cfe0cc;
+  }
+  .statrow { display: grid; grid-template-columns: repeat(4, 1fr); gap: .6rem; margin: 1rem 0; }
+  @media (max-width: 720px) { .statrow { grid-template-columns: 1fr 1fr; } }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: .85rem; }
+  .stat b { display: block; font-size: 1.35rem; letter-spacing: -.03em; color: var(--accent); font-family: ui-sans-serif, system-ui, sans-serif; }
+  .stat span { color: var(--muted); font-size: .82rem; font-family: ui-sans-serif, system-ui, sans-serif; }
+  footer { margin-top: 3rem; color: var(--faint); font: .85rem/1.5 ui-sans-serif, system-ui, sans-serif; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="hero">
+  <div class="kicker">Pi extension · Jev · observation not autobiography</div>
+  <h1>pi-jev-assist</h1>
+  <p class="lead">Checks an agent’s work against what was actually run and what the diff actually says. No slash command. Speaks when it has something; silent otherwise. Never edits your code, never certifies done, never starts a turn.</p>
+  <nav class="toc">
+    <a href="#shape">Shape</a>
+    <a href="#life">Lifecycle</a>
+    <a href="#features">Features</a>
+    <a href="#measure">Measured</a>
+    <a href="#install">Install</a>
+    <a href="#bounds">Bounds</a>
+  </nav>
+</header>
+
+<section id="shape">
+  <h2>The only shape that survived measurement</h2>
+  <div class="pipeline">
+    <div class="pipe"><b>Enumerate</b><span>git, ripgrep, a call graph. Mechanical. No vibes.</span></div>
+    <div class="arr">→</div>
+    <div class="pipe"><b>Classify with Jev</b><span>Small items. Abstention is a first-class answer.</span></div>
+    <div class="arr">→</div>
+    <div class="pipe"><b>You decide</b><span>Authority never moves. Tests still run the world.</span></div>
+  </div>
+  <p>Every tool that asked Jev to <strong>find</strong> a defect failed its known-bad case. Every tool that asked it to <strong>rank or score</strong> pre-enumerated evidence discriminated. That line is the product.</p>
+</section>
+
+<section id="life">
+  <h2>One session, every hook</h2>
+  <p class="muted">Cost is Jev unless noted. Fail-open everywhere a missing daemon must not stop work.</p>
+  <div class="timeline">
+    <div class="step">
+      <div class="when">session_start</div>
+      <h3>Warm the code graph</h3>
+      <p>Ensure a Vortex index and start a file watcher. Indexing a large repo takes minutes — doing it on the first write would stall the edit or silently degrade blast radius to text search. Fire-and-forget. Clears per-file speed bumps; re-bootstraps if cwd changed on resume/fork.</p>
+      <div class="cost">Off the critical path · no Jev</div>
+    </div>
+    <div class="step">
+      <div class="when">before_agent_start</div>
+      <h3>Skill suggestions from the live catalogue</h3>
+      <p>Scores the skills Pi is actually advertising this run — not a directory scan of the wrong folder. Suggests at most two above 0.90. Only name and path, never model-authored instructions. Catalogue over 128 skills: abstain explicitly rather than secretly shortlist.</p>
+      <div class="cost">1 Jev call</div>
+    </div>
+    <div class="step">
+      <div class="when">tool_call · write / edit</div>
+      <h3>Pre-write blast radius</h3>
+      <p>The only hook that runs <em>before</em> a change and can block. Names callers that depend on what the file exports. Speed bump, not a gate: once per file per session; re-issue the edit and it proceeds. Fails open. 12% of blocking review findings in 1,252 comments were unconsidered callers — a planning failure a post-diff check arrives too late to prevent.</p>
+      <div class="cost">Graph call, sub-second · no Jev</div>
+    </div>
+    <div class="step cost-none">
+      <div class="when">tool_result</div>
+      <h3>Clip huge dumps</h3>
+      <p>Results over 20k characters keep 6k head + 2k tail so a failure at the end of a test log still shows. Mechanical. Measured 0–29% of tool-result characters on real sessions.</p>
+      <div class="cost">None</div>
+    </div>
+    <div class="step cost-none">
+      <div class="when">tool_execution_*</div>
+      <h3>Evidence ledger</h3>
+      <p>Pairs calls with results by id. Redact before clip. Sensitive paths and credential-dumping commands withheld entirely. Bounded: 120 entries, 300-char commands, 1,200-char excerpts. <code>isError</code> is the only status Pi gives — the ledger never pretends a command “passed”.</p>
+      <div class="cost">None</div>
+    </div>
+    <div class="step">
+      <div class="when">context</div>
+      <h3>Live prune</h3>
+      <p>Same Jev questions as compaction, every turn after ≥8k of finished tool output — so later prefills shrink without waiting for <code>/compact</code>. Last 6 messages pinned. Fail-open. Live slice: 43% of judged tool text, 14% of a 40-message span.</p>
+      <div class="cost">1–2 Jev calls</div>
+    </div>
+    <div class="step">
+      <div class="when">agent_settled</div>
+      <h3>Review vs ledger, claims vs diff, callers of what changed</h3>
+      <p>Only when idle, clean stop, and there is something reviewable. Wrap-up prose with no check does not fire. Claims are checked against the working-tree diff, not against the assistant’s summary of itself. Callers only if files changed. Speaks only when there is a flag — chrome that prints every turn gets ignored.</p>
+      <div class="cost">≤3 Jev calls</div>
+    </div>
+    <div class="step">
+      <div class="when">session_before_compact</div>
+      <h3>Verbatim compaction</h3>
+      <p>Select, do not rewrite. Survivors are byte-for-byte; dropped output becomes a one-line note. Real 60-message span: 130,464 → 23,921 characters, 81.7% smaller, user constraints intact. Falls back to Pi’s summariser if saving &lt;25%, Jev fails, split turn, or there is no tool output to prune.</p>
+      <div class="cost">1–2 Jev calls</div>
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <h2>What each feature is for</h2>
+  <div class="grid two">
+    <div class="card"><strong>Skills, not the wrong folder</strong>Pi’s live catalogue only. Disable-model-invocation honoured. Suggestion is metadata, not new instructions.</div>
+    <div class="card"><strong>Blast radius before the edit</strong>Vortex call graph when present (transitive <code>Calls</code>, including callers that never mention the symbol). Ripgrep fallback that <em>says</em> it is textual.</div>
+    <div class="card"><strong>Evidence, not autobiography</strong>The settled review reads the ledger. Your own summary of your own work scores well and proves nothing.</div>
+    <div class="card"><strong>Claims vs the diff</strong>Structural claims discriminate. “Revokes poisoned payloads” scored 0.84 on a miss — absence is detection, where this fails. An overstated flag demotes a tick.</div>
+    <div class="card"><strong>Context that does not paraphrase</strong>Compaction and live prune delete finished tool output. Paths, error strings, and constraints stay verbatim.</div>
+    <div class="card"><strong>Hard limit, on purpose</strong>A diff shows what code <em>says</em>, never that it <em>works</em>. Tests remain the only authority on behaviour.</div>
+  </div>
+</section>
+
+<section id="measure">
+  <h2>Token spend and speed — tried on real work</h2>
+  <div class="statrow">
+    <div class="stat"><b>81.7%</b><span>verbatim compact, 60-msg span</span></div>
+    <div class="stat"><b>43%</b><span>live prune of judged tool text</span></div>
+    <div class="stat"><b>3/3</b><span>code-owned plan vs Pi 42s / 1.6s</span></div>
+    <div class="stat"><b>0/3</b><span>Jev as planner — faster and wrong</span></div>
+  </div>
+  <table>
+    <thead><tr><th>Experiment</th><th>What happened</th><th></th></tr></thead>
+    <tbody>
+      <tr><td>Clip dumps &gt;20k</td><td>0–29% of tool-result chars on 6 real sessions; ~0 ms</td><td><span class="tag yes">ship</span></td></tr>
+      <tr><td>Live prune in <code>context</code></td><td>14% of a 40-msg slice; ~21% upper bound on a 5.6MB session</td><td><span class="tag yes">ship</span></td></tr>
+      <tr><td>Code owns steps; Jev scores “enough?”</td><td>Quality 3/3. 7.2k Jev vs 39.5k Pi tokens. Stop-early never fired</td><td><span class="tag maybe">pattern</span></td></tr>
+      <tr><td>Closed-set dispatch fixture</td><td>18/18 gold, ~250 ms/task</td><td><span class="tag maybe">fixture</span></td></tr>
+      <tr><td>Jev picks the next tool</td><td>Looped rg/read, never ran tests</td><td><span class="tag no">no</span></td></tr>
+      <tr><td>Rerank rg lines</td><td>Dropped <code>function reviewAdvice</code></td><td><span class="tag no">no</span></td></tr>
+      <tr><td>Rank files from paths</td><td>Every file ~0.58; kept nothing</td><td><span class="tag no">no</span></td></tr>
+      <tr><td>Strip skills below 0.90</td><td>Dropped jev-review on PR triage</td><td><span class="tag no">no</span></td></tr>
+    </tbody>
+  </table>
+  <p>Long sessions: live prune + clip is the general lever, not 30% by itself. Mechanical investigate/test loops hit ~80% tokens and ~20× wall <em>if code owns the plan</em>. Short chats have no safe 30% cut.</p>
+</section>
+
+<section id="install">
+  <h2>Install and controls</h2>
+  <pre class="cmd">git clone &lt;this repo&gt; ~/Projects/pi-jev-assist
+cd ~/Projects/pi-jev-assist && bun install
+ln -s ~/Projects/pi-jev-assist ~/.pi/agent/extensions/jev-assist</pre>
+  <p><code>TYPESAFE_API_KEY</code> or owner-only <code>~/.config/typesafe/env</code> (<code>KEY=value</code>, parsed, never sourced). Restart Pi. <code>/jev-assist status</code>.</p>
+  <div class="grid three">
+    <div class="card"><strong>/jev-assist status</strong>Model, usage, on/off</div>
+    <div class="card"><strong>/jev-assist off</strong>Persisted under <code>~/.pi/agent/jev-assist/</code></div>
+    <div class="card"><strong>PI_JEV_ASSIST=off</strong>Env kill switch wins over the file</div>
+  </div>
+  <p>Vortex is optional. Graph when present; ripgrep fallback that names itself. See vortex.md.</p>
+</section>
+
+<section id="bounds">
+  <h2>Bounds (tested)</h2>
+  <div class="grid two">
+    <div class="card"><strong>2.5 s · no retries</strong>A hung Jev must not stall the agent.</div>
+    <div class="card"><strong>48,000 bytes / request</strong>Checked on the serialised body.</div>
+    <div class="card"><strong>6 / run · 300 / session</strong>Independent budgets.</div>
+    <div class="card"><strong>Breaker</strong>Three consecutive failures open it for 60 s.</div>
+    <div class="card"><strong>Redact, then clip</strong>A secret cannot survive as a shorter string.</div>
+    <div class="card"><strong>Never sent</strong>.env, auth.json, .ssh/, *.pem, credential-dumping commands — not contents, not argv.</div>
+  </div>
+</section>
+
+<footer>
+  MIT. architecture.md · measurements.md · limitations.md · vortex.md · UPSTREAM.md
+  · <code>bun run check</code>
+  · A generation counter discards late Jev answers after a new prompt, tree switch, or shutdown.
+</footer>
+</div>
+</body>
+</html>

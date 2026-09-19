@@ -4,8 +4,8 @@ import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { EvidenceLedger } from './src/evidence.js';
 import { createService, type AssistService } from './src/service.js';
-import { ADVISORY, POLICY_VERSION, clean, digest, probability, skillRequest, selectedSkills, reviewRequest, reviewAdvice, reviewable, IncompleteAnswersError, type Request } from './src/decisions.js';
-import { collectCalls, pinnedIds, buildState, questionsFor, batchCalls, decide, render, reductionRatio, type Decision } from './src/compaction.js';
+import { ADVISORY, POLICY_VERSION, clean, digest, probability, skillRequest, selectedSkills, reviewRequest, reviewAdvice, reviewable, isCheckCommand, runnerPassed, claimSupportRequest, IncompleteAnswersError, type Request } from './src/decisions.js';
+import { collectCalls, pinnedIds, buildState, questionsFor, batchCalls, decide, render, reductionRatio, applyDecisionsToMessages, clipHugeText, type Decision } from './src/compaction.js';
 import { workingDiff, claimsFrom, claimQuestions, claimAdvice, buildClaimState, enumerateCallers, parseCallers, callerQuestions, changedSymbols, exportedSymbolsOf, MAX_CALLERS } from './src/autonomous.js';
 import { CodeGraph, type GraphCaller } from './src/codegraph.js';
 
@@ -31,6 +31,8 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
   let bootstrapped = '';
   /** Generation whose review must NOT wake the agent: the one our own wake started. */
   let suppressTrigger = -1;
+  /** Last posted completion-flag digest; a wake follow-up with the same flags stays silent. */
+  let lastFlagKey = '';
   /** Files already speed-bumped this session; the bump never repeats. */
   const warned = new Set<string>();
   let enabled = false;
@@ -41,7 +43,8 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
   let task = '';
   let finalText = '';
   let finalNormal = false;
-  const invalidate = () => { generation++; controller.abort(); controller = new AbortController(); ledger.reset(); finalText=''; finalNormal=false; task=''; };
+  let lastLivePrune = '';
+  const invalidate = () => { generation++; controller.abort(); controller = new AbortController(); ledger.reset(); finalText=''; finalNormal=false; task=''; lastLivePrune=''; };
   // Deliberately NOT cleared by invalidate(): the bump is per FILE per session,
   // so a new prompt in the same session does not re-interrupt the same edit.
   void warned;
@@ -50,7 +53,7 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
   const record = (stage:string, request:Request, details:Record<string,unknown>) => pi.appendEntry('jev-assist-decision', {policy:POLICY_VERSION,stage,generation,inputHash:digest(request),...details,usage:service.usage()});
 
   pi.on('session_start', (_event: {reason?: string} | undefined, ctx) => {
-    alive=true; invalidate(); enabled=(dependencies.readEnabled ?? readEnabled)();
+    alive=true; lastFlagKey=''; invalidate(); enabled=(dependencies.readEnabled ?? readEnabled)();
     if(ctx.hasUI) ctx.ui.setWidget('jev-assist',undefined);
     status(ctx, enabled ? 'Jev · automatic advice' : 'Jev · off');
     // session_start fires for EVERY entry point — startup, reload, new, resume
@@ -79,7 +82,7 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
       } catch { /* advisory: a missing graph is never fatal */ }
     })();
   });
-  pi.on('session_shutdown', () => { alive=false; invalidate(); graph.dispose(); });
+  pi.on('session_shutdown', () => { alive=false; lastFlagKey=''; invalidate(); graph.dispose(); });
   // Prune finished tool output instead of summarising it, so what survives is
   // VERBATIM. Returning nothing hands compaction back to Pi's own summariser,
   // and that is the right answer more often than not: a span of mostly prose
@@ -147,7 +150,7 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
     return {compaction: {summary, firstKeptEntryId: preparation.firstKeptEntryId,
       tokensBefore: typeof preparation.tokensBefore === 'number' ? preparation.tokensBefore : 0}};
   });
-  pi.on('session_tree', (_event,ctx) => { invalidate(); if(ctx.hasUI) ctx.ui.setWidget('jev-assist',undefined); });
+  pi.on('session_tree', (_event,ctx) => { lastFlagKey=''; invalidate(); if(ctx.hasUI) ctx.ui.setWidget('jev-assist',undefined); });
   pi.on('before_agent_start', async (event,ctx) => {
     invalidate();
     if(ctx.hasUI) ctx.ui.setWidget('jev-assist',undefined);
@@ -219,8 +222,63 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
   pi.on('tool_execution_start', (event) => {
     if(alive && enabled) ledger.recordCall(event.toolCallId,event.toolName,event.args as Record<string,unknown>);
   });
+  // Cap dumps that would otherwise sit in every later prefill. Mechanical: no Jev,
+  // no stall, fail-open. Head+tail so a failure at the end of a test log survives.
+  pi.on('tool_result', (event) => {
+    if (!alive || !enabled) return;
+    const parts = Array.isArray(event.content) ? event.content : [];
+    const idx = parts.findIndex((p: {type?: string}) => p?.type === 'text');
+    if (idx < 0) return;
+    const block = parts[idx] as {type: string; text?: string};
+    if (typeof block.text !== 'string') return;
+    const clipped = clipHugeText(block.text);
+    if (!clipped.clipped) return;
+    pi.appendEntry('jev-assist-decision', {policy:POLICY_VERSION,stage:'clip-huge',tool:event.toolName,before:block.text.length,after:clipped.text.length});
+    const next = parts.slice();
+    next[idx] = { type: 'text' as const, text: clipped.text };
+    return { content: next };
+  });
   pi.on('tool_execution_end', (event) => {
     if(alive && enabled) ledger.recordResult(event.toolCallId,event.toolName,event.result.content,event.isError,event.result.details);
+  });
+  // Same prune as compaction, but every turn AFTER tools have piled up — so later
+  // LLM calls are smaller without waiting for Pi's compaction threshold.
+  (pi.on as (name: string, fn: (event: unknown, ctx: ExtensionContext) => unknown) => void)('context', async (event: unknown, ctx: ExtensionContext) => {
+    if (!alive || !enabled) return;
+    const messages = (event as {messages?: unknown[]}).messages;
+    if (!Array.isArray(messages) || messages.length < 8) return;
+    const {transcript, calls} = collectCalls(messages);
+    const pinned = pinnedIds(transcript, calls, 6);
+    const judged = calls.filter(c => !pinned.has(c.id) && (c.resultChars ?? 0) >= 400);
+    const volume = judged.reduce((n, c) => n + (c.resultChars ?? 0), 0);
+    if (judged.length < 2 || volume < 8_000) return;
+    const key = digest(judged.map(c => [c.id, c.resultChars]));
+    if (key === lastLivePrune) return;
+    lastLivePrune = key;
+    const g = generation;
+    const state = buildState(transcript, task);
+    const decisions = new Map<string, Decision>();
+    let firstRequest: Request | undefined;
+    for (const batch of batchCalls(judged)) {
+      const request = {state, questions: questionsFor(batch)};
+      firstRequest ??= request;
+      const result = await service.evaluate(request, controller.signal);
+      if (!active(g) || !result.ok) {
+        batch.forEach(call => decisions.set(call.id, 'keep'));
+        continue;
+      }
+      batch.forEach((call, i) => decisions.set(call.id, decide(result.answers, i, 0.5)));
+    }
+    if (!firstRequest) return;
+    if (![...decisions.values()].some(d => d !== 'keep')) {
+      record('live-prune', firstRequest, {status:'noop',judged:judged.length,volume});
+      return;
+    }
+    const outcome = applyDecisionsToMessages(messages, decisions, 300);
+    record('live-prune', firstRequest, {status:'applied', ...outcome, judged:judged.length});
+    if (outcome.mutated === 0) return;
+    if (ctx.hasUI) ctx.ui.notify(`Jev live-pruned ${outcome.mutated} tool result(s); ${(100*(1-outcome.charsAfter/Math.max(1,outcome.charsBefore))).toFixed(0)}% smaller context.`, 'info');
+    return { messages };
   });
   pi.on('message_end', (event) => {
     if (!alive || !enabled || event.message.role !== 'assistant') return;
@@ -252,7 +310,7 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
       return;
     }
     let advice;
-    try { advice=reviewAdvice(result.answers,prepared.candidates,prepared.exitsRecorded,prepared.hadWorkError); }
+    try { advice=reviewAdvice(result.answers,prepared.candidates,prepared.exitsRecorded,prepared.hadWorkError,prepared.runnerOk); }
     catch (error) {
       // An omitted answer is a service fault, not an abstention; say so rather
       // than silently dropping the finding it belonged to.
@@ -268,6 +326,13 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
     // it did: observed being ignored twice in one session before the user had to
     // say so by hand. Scores still go to the ledger entry; they are diagnostics,
     // not a message.
+    const flagKey=digest(advice.flags);
+    // The wake follow-up is allowed to review, but repeating the same flags is chrome — measured as the same prettier+git banner after the agent already re-ran.
+    if (generation === suppressTrigger && flagKey === lastFlagKey && advice.flags.length) {
+      record('review-delivery', prepared.request, {flags:advice.flags.length, triggered:false, duplicate:true});
+      if(ctx.hasUI) ctx.ui.setWidget('jev-assist',undefined);
+      return;
+    }
     const lines=[...advice.flags];
     // The run changed files, so two more things can be checked against
     // OBSERVATION rather than against the assistant's account of itself: does
@@ -276,7 +341,7 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
     if (evidence.mutations > 0) {
       const cwd = (ctx as unknown as {cwd?: string}).cwd ?? process.cwd();
       const diff = workingDiff(cwd);
-      const claims = claimsFrom(finalText);
+      const claims = claimsFrom(finalText, diff);
       if (diff && claims.length) {
         const request = {state: buildClaimState(claims, diff), questions: claimQuestions(claims)};
         const claimResult = await service.evaluate(request, controller.signal);
@@ -319,8 +384,10 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
       }
 
       const enumerated = graphCallers.length ? [] : parseCallers(enumerateCallers(cwd)).slice(0, MAX_CALLERS);
-      if (graphNote && !graphCallers.length) {
-        lines.push(`Code graph unavailable (${graphNote}) — falling back to a text search, which cannot see callers that do not name the symbol.`);
+      // Graph-down is an infrastructure note. Putting it on the wake payload
+      // forced a Grok turn that cannot repair vortexd. Widget only.
+      if (graphNote && !graphCallers.length && ctx.hasUI) {
+        ctx.ui.setWidget('jev-assist',[`Code graph unavailable (${graphNote}) — caller search is text-only this turn.`]);
       }
       if (active(g) && enumerated.length) {
         const request = {
@@ -346,33 +413,57 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
       }
     }
 
-    if(!lines.length) {
-      if(ctx.hasUI) ctx.ui.setWidget('jev-assist',undefined);
-      return; // No reassuring "verified" message on a low score.
+    if(!advice.flags.length) {
+      // Callers / graph chrome may sit on the widget. They must not wake Grok.
+      // Observed: a turn with no Jev flag still posted "graph unavailable" plus
+      // "re-run git diff … test/decisions.test.ts" because `test/` matched CHECK_COMMAND.
+      if(lines.length && ctx.hasUI) ctx.ui.setWidget('jev-assist',lines);
+      record('review-delivery', prepared.request, {flags:0, triggered:false, reason:'no flags'});
+      return;
     }
-    // Name the command to re-run, so the response is an action rather than a
-    // feeling. "Possible unsupported verification claim" invites a nod; "re-run
-    // this and print the exit code" does not.
-    const checkCommands=evidence.observations.filter(o=>o.tool==='bash'&&/\b(test|typecheck|lint|check|build)\b/.test(o.call)).slice(-2).map(o=>o.call);
-    if(checkCommands.length) lines.push(`Re-run and report the exit code, separately, before restating the result: ${checkCommands.map(c=>`\`${c}\``).join(' and ')}`);
-    lines.push(`Coverage: ${evidence.dropped} ledger entries and ${Math.max(0,evidence.observations.length-12)} observations omitted; ${prepared.omitted} finding candidates omitted; ${advice.unassessable} not assessable from the record.`,ADVISORY);
+    const runners=evidence.observations.filter(o=>o.tool==='bash'&&isCheckCommand(o.call));
+    const lastRunner=[...new Map(runners.map(o=>[o.call,o])).values()].at(-1);
+    const unsupported=advice.flags.some(f=>/unsupported verification/i.test(f));
+    if(unsupported && lastRunner && !runnerPassed(lastRunner.output)) {
+      lines.push(`Re-run and report the exit code, separately, before restating the result: \`${lastRunner.call}\``);
+    }
+    lines.push(ADVISORY);
     if(ctx.hasUI) ctx.ui.setWidget('jev-assist',lines);
-    // WAKE THE AGENT when a flag fired. A message delivered with
-    // triggerTurn:false lands after the turn has ended, so nothing acts on it
-    // and it reads as decoration — measured: ignored twice in one session while
-    // the claim it flagged was in fact unevidenced.
-    //
-    // The loop guard is the reason this is safe: a run STARTED by this trigger
-    // never triggers another. So the worst case is one extra turn per flagged
-    // run, never a cycle.
-    // If it speaks at all, the agent must engage with it. Silence is reserved
-    // for having nothing to say — that is what keeps the banner worth reading.
     lines.push('Acknowledge each point above before continuing: accept it and act, or reject it and say on what evidence. Do not restate the original claim without doing one or the other.');
     const wake = generation !== suppressTrigger;
-    if (wake) suppressTrigger = generation + 1; // the run this starts
+    if (wake) suppressTrigger = generation + 1;
+    lastFlagKey = flagKey;
     record('review-delivery', prepared.request, {flags:advice.flags.length, triggered:wake});
     pi.sendMessage({customType:'jev-assist-review',content:lines.join('\n'),display:true},{triggerTurn:wake});
   });
+  pi.registerTool({
+    name: 'jev_claim_support',
+    label: 'Jev claim support',
+    description: 'Ask Jev whether pasted evidence supports one claim. Refuse empty evidence. Not for finding bugs or scoring a whole diff.',
+    promptSnippet: 'Check one claim against evidence you already have (command output, a hunk)',
+    promptGuidelines: [
+      'Use jev_claim_support only after you have a receipt (test output, issue status, a diff hunk). Do not call it with an empty evidence field.',
+    ],
+    parameters: {
+      type: 'object',
+      properties: {
+        claim: { type: 'string', description: 'One sentence to check.' },
+        evidence: { type: 'string', description: 'Command output or a hunk that could settle it. Not a restatement of the claim.' },
+      },
+      required: ['claim', 'evidence'],
+    },
+    async execute(_id: string, params: { claim?: string; evidence?: string }, signal?: AbortSignal) {
+      if (!alive || !enabled) return { content: [{ type: 'text', text: 'jev-assist is off.' }] };
+      const prepared = claimSupportRequest(String(params.claim ?? ''), String(params.evidence ?? ''));
+      if ('reason' in prepared) return { content: [{ type: 'text', text: `Refused: ${prepared.reason}` }] };
+      const result = await service.evaluate(prepared.request, signal);
+      if (!result.ok) return { content: [{ type: 'text', text: `Jev unavailable (${result.reason}).` }] };
+      const supported = probability(result.answers.supported) ?? 0;
+      const contradicted = probability(result.answers.contradicted) ?? 0;
+      record('claim-support', prepared.request, { supported, contradicted, model: result.model });
+      return { content: [{ type: 'text', text: `supported=${supported.toFixed(2)} contradicted=${contradicted.toFixed(2)} (advisory)` }] };
+    },
+  } as never);
   pi.registerCommand('jev-assist',{
     description:'Automatic Jev advice: status, on, off. Never grants permissions or certifies completion.',
     handler:async(args,ctx)=>{

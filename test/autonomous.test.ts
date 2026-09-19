@@ -40,6 +40,16 @@ test('a guard described by what it PREVENTS is still a positive claim', () => {
   assert.equal(claims.length, 2);
 });
 
+test('process claims about a home-dir skill are not judged against a src diff', () => {
+  const diff = ['diff --git a/src/decisions.ts b/src/decisions.ts', '+++ b/src/decisions.ts', '+export function isCheckCommand() {}'].join('\n');
+  const claims = claimsFrom([
+    'Pi now has its own vault-plan at ~/.agents/skills/vault-plan and it is live on the next Pi session.',
+    'Added isCheckCommand so prettier --check is not treated as a test runner in this file.',
+  ].join('\n'), diff);
+  assert.equal(claims.length, 1);
+  assert.match(claims[0]!, /isCheckCommand/);
+});
+
 test('claims are capped and short fragments ignored', () => {
   const many = Array.from({length: 30}, (_, i) => `- Added feature number ${i} to the system in a clearly stated way.`).join('\n');
   assert.equal(claimsFrom(many).length, MAX_CLAIMS);

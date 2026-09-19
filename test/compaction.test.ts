@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { collectCalls, pinnedIds, buildState, questionsFor, decide, render, reductionRatio, type Decision } from '../src/compaction.js';
+import { collectCalls, pinnedIds, buildState, questionsFor, decide, render, reductionRatio, clipHugeText, applyDecisionsToMessages, HUGE_RESULT_CHARS, type Decision } from '../src/compaction.js';
 
 const assistant = (text: string, calls: Array<{id: string; name: string; args: unknown}> = []) => ({
   role: 'assistant',
@@ -104,4 +104,28 @@ test('every call gets both questions', () => {
   const { calls } = collectCalls(SPAN);
   const q = questionsFor(calls);
   assert.deepEqual(Object.keys(q).sort(), ['call_0', 'call_1', 'result_0', 'result_1']);
+});
+
+test('huge dumps keep head and tail without Jev', () => {
+  const small = clipHugeText('ok');
+  assert.equal(small.clipped, false);
+  const huge = 'H'.repeat(HUGE_RESULT_CHARS + 5000) + 'TAILMARK';
+  const out = clipHugeText(huge);
+  assert.equal(out.clipped, true);
+  assert.ok(out.text.startsWith('H'));
+  assert.match(out.text, /TAILMARK/);
+  assert.ok(out.text.length < huge.length);
+});
+
+test('live prune mutates tool results only', () => {
+  const messages = [
+    user('keep me'),
+    assistant('x', [{ id: 't1', name: 'read', args: {} }]),
+    result('t1', 'read', 'BODY'.repeat(100)),
+  ];
+  const dropped = applyDecisionsToMessages(messages, new Map([['t1', 'drop']]), 20);
+  assert.equal(dropped.mutated, 1);
+  assert.ok(dropped.charsAfter < dropped.charsBefore);
+  assert.match((messages[2] as {content: Array<{text: string}>}).content[0]!.text, /dropped as finished/);
+  assert.match((messages[0] as {content: Array<{text: string}>}).content[0]!.text, /keep me/);
 });

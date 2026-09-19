@@ -43,12 +43,18 @@ export function workingDiff(cwd: string): string {
  * sentence and bullet boundaries keeps each one small enough to judge
  * separately, which is the shape that works; a whole paragraph is not.
  */
-export function claimsFrom(finalText: string): string[] {
+export function claimsFrom(finalText: string, diff = ''): string[] {
+  const files = [...diff.matchAll(/^diff --git a\/(\S+)/gm)].map(m => m[1]!);
+  const basenames = files.map(f => f.split('/').pop()!).filter(Boolean);
+  const symbols = diff ? changedSymbols(diff) : [];
+  const aboutDiff = (s: string) =>
+    !diff || files.some(f => s.includes(f)) || basenames.some(b => b && s.includes(b)) || symbols.some(n => s.includes(n));
   const parts = finalText
     .split(/\n+/)
     .flatMap(line => line.replace(/^[-*\d.\s]+/, '').split(/(?<=[.!?])\s+(?=[A-Z`])/))
     .map(s => s.trim())
     .filter(s => s.length >= 25 && s.length <= 400)
+    .filter(aboutDiff)
     // Only assertions about the work. Questions and offers are not claims.
     .filter(s => !s.endsWith('?'))
     // A NEGATIVE claim inverts this entire check: "I did not add validation" is
