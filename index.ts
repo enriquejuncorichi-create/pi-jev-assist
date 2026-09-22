@@ -14,6 +14,8 @@ import { injectionRequest, injectionWarning } from './src/injection.js';
 import { collectCalls, pinnedIds, buildState, questionsFor, batchCalls, decide, render, reductionRatio, applyDecisionsToMessages, clipHugeText, type Decision } from './src/compaction.js';
 import { workingDiff, snapshotHead, claimsFrom, claimQuestions, claimAdvice, buildClaimState, enumerateCallers, parseCallers, callerQuestions, changedSymbols, exportedSymbolsOf, MAX_CALLERS } from './src/autonomous.js';
 import { CodeGraph, type GraphCaller } from './src/codegraph.js';
+import { installWorkerRouting } from './src/worker-extension.js';
+import { loadRoutingQualifications } from './src/worker-qualifications.js';
 
 function envOff(): boolean { return process.env.PI_JEV_ASSIST === 'off' || process.env.PI_JEV_ASSIST === '0'; }
 function readEnabled(): boolean {
@@ -59,6 +61,31 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
   const active = (g:number) => alive && enabled && g === generation && !controller.signal.aborted;
   const status = (ctx:ExtensionContext, text:string|undefined) => { if (ctx.hasUI) ctx.ui.setStatus('jev-assist',text); };
   const record = (stage:string, request:Request, details:Record<string,unknown>) => pi.appendEntry('jev-assist-decision', {policy:POLICY_VERSION,stage,generation,inputHash:digest(request),...details,usage:service.usage()});
+
+  const workers = pi.events ? installWorkerRouting(pi, service, {
+    enabled: () => alive && enabled && cfg.workerRouting,
+    setEnabled: (workerRouting) => {
+      if (workerRouting && envOff()) throw new Error('PI_JEV_ASSIST disables this extension');
+      const next = { ...cfg, workerRouting };
+      saveConfig(next);
+      cfg = next;
+    },
+    exclusions: () => cfg.workerExclusions,
+    setExclusions: (workerExclusions) => {
+      const next = { ...cfg, workerExclusions };
+      saveConfig(next);
+      cfg = next;
+    },
+    qualifications: () => loadRoutingQualifications(),
+    policy: () => cfg.workerPolicy,
+    routingMode: () => cfg.workerRoutingMode,
+    routeRubrics: () => cfg.workerRouteRubrics,
+    setPolicy: (workerPolicy) => {
+      const next = { ...cfg, workerPolicy };
+      saveConfig(next);
+      cfg = next;
+    },
+  }) : undefined;
 
   pi.on('session_start', (_event: {reason?: string} | undefined, ctx) => {
     alive=true; lastFlagKey=''; invalidate(); cfg=loadConfig(); enabled=(dependencies.readEnabled ?? readEnabled)();
@@ -604,18 +631,28 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
       const persistCfg=()=>{ try { saveConfig(cfg); } catch { if(ctx.hasUI) ctx.ui.notify('Could not save settings.','error'); } };
       const parts=args.trim().split(/\s+/).filter(Boolean);
       const action=parts[0] || (ctx.hasUI && typeof ctx.ui.select==='function' ? 'menu' : 'status');
+      if (action === 'routing') {
+        if (!workers) throw new Error('Managed worker event bus unavailable');
+        // Preserve literal spaces in a quoted local bundle path rather than
+        // round-tripping it through the ordinary whitespace command splitter.
+        const imported = args.trim().match(/^routing\s+qualification\s+import\s+([\s\S]+)$/);
+        await workers.command(imported ? ['qualification', 'import', imported[1]!] : parts.slice(1), ctx);
+        return;
+      }
       if(action==='off' || action==='on') {
         const next=action==='on';
         if(next && envOff()) { if(ctx.hasUI) ctx.ui.notify('PI_JEV_ASSIST disables this extension; change the environment and restart.','warning'); return; }
         try { (dependencies.saveEnabled ?? saveEnabled)(next); cfg={...cfg,enabled:next}; }
         catch { if(ctx.hasUI) ctx.ui.notify('Could not save Jev setting; no state changed.','error'); return; }
         invalidate(); enabled=next;
+        if (!next) await workers?.disable();
         if(ctx.hasUI) ctx.ui.setWidget('jev-assist',undefined);
       }
       if(action==='pin') { cfg={...cfg,pin:clean(parts.slice(1).join(' ') || task, 240)}; persistCfg(); }
       if(action==='unpin') { cfg={...cfg,pin:''}; persistCfg(); }
       if(action==='set' && parts[1] && (parts[2]==='on'||parts[2]==='off') && (FEATURES as readonly string[]).includes(parts[1])) {
-        cfg={...cfg, [parts[1]]: parts[2]==='on'} as AssistConfig; persistCfg();
+        if (parts[1] === 'workerRouting' && workers) await workers.command([parts[2]], ctx);
+        else { cfg={...cfg, [parts[1]]: parts[2]==='on'} as AssistConfig; persistCfg(); }
       }
       if(action==='cache' && parts[1] && /^\d+$/.test(parts[1])) {
         cfg={...cfg, cacheSeconds: Math.min(3600, Number(parts[1]))}; persistCfg();
@@ -627,6 +664,7 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
           const home=await ui.select('jev-assist', [
             cfg.enabled ? 'Master switch  ·  ON' : 'Master switch  ·  off',
             'Toggle features…',
+            'Worker routing…',
             cfg.pin ? `Pin  ·  ${cfg.pin.slice(0,48)}` : 'Set pin…',
             'Clear pin',
             `Jev cache  ·  ${cfg.cacheSeconds}s`,
@@ -636,8 +674,23 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
           if (home.startsWith('Master')) {
             const next=!cfg.enabled;
             if(next && envOff()) { ui.notify('PI_JEV_ASSIST disables this extension; change the environment and restart.','warning'); continue; }
-            try { (dependencies.saveEnabled ?? saveEnabled)(next); cfg={...cfg,enabled:next}; invalidate(); enabled=next; }
+            try { (dependencies.saveEnabled ?? saveEnabled)(next); cfg={...cfg,enabled:next}; invalidate(); enabled=next; if (!next) await workers?.disable(); }
             catch { ui.notify('Could not save.','error'); }
+            continue;
+          }
+          if (home === 'Worker routing…' && workers) {
+            const choice = await ui.select('Subscription-only workers', ['Back', cfg.workerRouting ? 'Turn routing off' : 'Turn routing on', 'Available routes', 'Routing status', 'Recent decisions', 'Exclude route', 'Include route', 'List qualifications', 'Import qualification', 'Revoke qualification']);
+            const commands: Record<string, string[]> = { 'Turn routing on': ['on'], 'Turn routing off': ['off'], 'Available routes': ['routes'], 'Routing status': ['status'], 'Recent decisions': ['recent'], 'Exclude route': ['exclude'], 'Include route': ['include'], 'List qualifications': ['qualification', 'list'], 'Import qualification': ['qualification', 'import'], 'Revoke qualification': ['qualification', 'revoke'] };
+            const command = choice ? commands[choice] : undefined;
+            if (command) {
+              if (choice && ['Exclude route', 'Include route', 'Import qualification', 'Revoke qualification'].includes(choice)) {
+                const value = await ui.input(choice, choice === 'Import qualification' ? 'Absolute local JSON path' : choice === 'Revoke qualification' ? 'Exact qualification key from list' : 'Exact provider/model from routes');
+                if (!value?.trim()) continue;
+                command.push(value.trim());
+              }
+              try { await workers.command(command, ctx); }
+              catch (error) { ui.notify(error instanceof Error ? error.message : 'Worker routing unavailable', 'error'); }
+            }
             continue;
           }
           if (home==='Toggle features…') {
@@ -647,8 +700,13 @@ export function installAssist(pi: ExtensionAPI, dependencies: Dependencies = {})
               if (!picked || picked==='Back') break;
               const name=featureFromOption(picked);
               if (!name) break;
-              cfg={...cfg, [name]: !cfg[name]} as AssistConfig;
-              persistCfg();
+              if (name === 'workerRouting' && workers) {
+                try { await workers.command([cfg.workerRouting ? 'off' : 'on'], ctx); }
+                catch (error) { ui.notify(error instanceof Error ? error.message : 'Worker routing unavailable', 'error'); }
+              } else {
+                cfg={...cfg, [name]: !cfg[name]} as AssistConfig;
+                persistCfg();
+              }
             }
             continue;
           }

@@ -1,6 +1,8 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+import { parseWorkerPolicy, type WorkerPolicy } from './worker-task-contract.js';
+import { parseRouteRubrics, type RouteRubric } from './worker-routing.js';
 
 export const CONFIG_PATH = join(homedir(), '.pi', 'agent', 'jev-assist', 'config.json');
 export const PRUNE_PATH = join(homedir(), '.pi', 'agent', 'jev-assist', 'prune-cache.json');
@@ -8,7 +10,7 @@ export const PRUNE_PATH = join(homedir(), '.pi', 'agent', 'jev-assist', 'prune-c
 export const FEATURES = [
   'livePrune', 'clipHuge', 'hitIndex', 'failureClass', 'dupSkip', 'toolRouter',
   'skills', 'modeCard', 'injectionScreen', 'taskPin', 'persistPrune',
-  'claimBaseline', 'preeditFile', 'review', 'vaultWrite',
+  'claimBaseline', 'preeditFile', 'review', 'vaultWrite', 'workerRouting',
 ] as const;
 export type Feature = typeof FEATURES[number];
 
@@ -28,6 +30,7 @@ export const FEATURE_LABEL: Record<Feature, string> = {
   preeditFile: 'Judge the reconstructed file before write/edit',
   review: 'Settled review vs ledger and diff',
   vaultWrite: 'Vault write — ADD / UPDATE / SUPERSEDE / NOOP from prepare_write',
+  workerRouting: 'Worker routing — subscription-only, Jev rubric or qualified mode',
 };
 
 export function featureOption(cfg: AssistConfig, f: Feature): string {
@@ -58,6 +61,11 @@ export interface AssistConfig {
   preeditFile: boolean;
   review: boolean;
   vaultWrite: boolean;
+  workerRouting: boolean;
+  workerExclusions: string[];
+  workerPolicy: WorkerPolicy;
+  workerRoutingMode: 'rubric' | 'qualified';
+  workerRouteRubrics: RouteRubric[];
 }
 
 export const DEFAULTS: AssistConfig = {
@@ -79,6 +87,11 @@ export const DEFAULTS: AssistConfig = {
   preeditFile: true,
   review: true,
   vaultWrite: true,
+  workerRouting: false,
+  workerExclusions: [],
+  workerPolicy: { mode: 'automatic' },
+  workerRoutingMode: 'rubric',
+  workerRouteRubrics: [],
 };
 
 function atomicWrite(path: string, body: string): void {
@@ -92,10 +105,30 @@ export function loadConfig(path = CONFIG_PATH): AssistConfig {
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<AssistConfig>;
     const cacheSeconds = Number(raw.cacheSeconds);
+    let workerPolicy: WorkerPolicy = { mode: 'automatic' };
+    let invalidPolicy = false;
+    try { workerPolicy = parseWorkerPolicy(raw.workerPolicy === undefined ? { mode: 'automatic' } : raw.workerPolicy); }
+    catch {
+      // Retain a refusing policy until explicitly repaired; never widen a damaged allowlist.
+      invalidPolicy = true;
+      workerPolicy = { mode: 'allowlist', routes: [] };
+    }
+    let workerRouteRubrics: RouteRubric[] = [];
+    let invalidRubrics = false;
+    try { workerRouteRubrics = parseRouteRubrics(raw.workerRouteRubrics ?? []); }
+    catch { invalidRubrics = true; }
+    const mode = raw.workerRoutingMode === 'rubric' || raw.workerRoutingMode === 'qualified'
+      ? raw.workerRoutingMode : raw.workerRouting === true && raw.workerRoutingMode === undefined ? 'qualified' : 'rubric';
+    if (raw.workerRoutingMode !== undefined && raw.workerRoutingMode !== mode) invalidRubrics = true;
     return {
       ...DEFAULTS,
       ...raw,
       enabled: raw.enabled !== false,
+      workerRouting: raw.workerRouting === true && !invalidPolicy && !invalidRubrics,
+      workerPolicy,
+      workerRoutingMode: mode,
+      workerRouteRubrics,
+      workerExclusions: Array.isArray(raw.workerExclusions) ? raw.workerExclusions.filter((value): value is string => typeof value === 'string' && value.length > 0 && value.length <= 241).slice(0, 128) : [],
       cacheSeconds: Number.isFinite(cacheSeconds) && cacheSeconds >= 0 && cacheSeconds <= 3600 ? cacheSeconds : DEFAULTS.cacheSeconds,
       pin: typeof raw.pin === 'string' ? raw.pin.slice(0, 500) : '',
     };
