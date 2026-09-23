@@ -232,6 +232,20 @@ Jev classifies supplied evidence. It must not find, plan, or delete skills.
 
 ---
 
+## Subscription-only subagent model routing
+
+**Your current Pi model remains the orchestrator.** Jev chooses an eligible model for each delegated worker task; it never switches the parent model or thinking level. Routing is **off by default**. Enable it with `/jev-assist routing on` in an interactive session and inspect `/jev-assist routing status` and `routing routes` first.
+
+![Worker routing: subscription filter, exact Jev choice, revalidation and unchanged orchestrator](docs/worker-routing.svg)
+
+For each task, the router classifies risk and required capabilities, then filters to authenticated native subscription routes with sufficient context, compatible modalities and your exclusions/allowlist. Jev receives only those candidates and bounded task-fit rubrics; it chooses one exact route ID or abstains. The route is checked again at dispatch. If Jev is unavailable or uncertain, only an **eligible main-model baseline** can be used; if that baseline is excluded, dispatch refuses. A failed worker never triggers a hidden retry or paid fallback. The result goes back to the unchanged orchestrator for independent review.
+
+Fresh configurations use **rubric** mode. Exact built-in model descriptions and optional route/role-specific rubrics guide Jev; they are heuristics, not measured savings or proof of quality. Previously enabled routing configurations without an explicit mode stay in **qualified** mode, where accepted-result benchmark evidence must be reviewed and approved before using an alternative. To change that configuration, set `"workerRoutingMode": "rubric"` in the global Jev Assist config and reload. The settings menu also offers routes, exclusions, recent decisions and qualification controls.
+
+Subscription-allowance debit per worker/model is **not observable** from the current SDK. Neither API prices, tokens, speed nor account-wide allowance windows establish actual subscription savings. Jev evaluation sends a bounded task excerpt to Vercel/TypeSafe; avoid credentials in tasks. Resumes retain observed-byte bounds, and cache residency and context occupancy remain unknown. There is no automatic main-model review guarantee beyond the orchestrator receiving the worker output—inspect the evidence before accepting it.
+
+See [controls, rubric configuration, privacy, qualification schema and limitations](docs/worker-routing.md). Routing remains off until you explicitly enable it.
+
 ## Install
 
 ```sh
